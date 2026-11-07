@@ -53,11 +53,14 @@ object StarAlignmentEngine {
             val row = ByteArray(width * 4)
 
             for (sy in 0 until sh) {
-                input.seek(sy.toLong() * width * 4L)
+                val sourceY = minOf(sy * step, height - 1)
+
+                input.seek(sourceY.toLong() * width * 4L)
                 input.readFully(row)
 
                 for (sx in 0 until sw) {
-                    val offset = sx * step * 4
+                    val sourceX = minOf(sx * step, width - 1)
+                    val offset = sourceX * 4
 
                     val r = row[offset + 1].toInt() and 255
                     val g = row[offset + 2].toInt() and 255
@@ -71,26 +74,39 @@ object StarAlignmentEngine {
         }
 
         val histogram = IntArray(256)
-        for (v in gray) histogram[v.toInt() and 255]++
+        for (v in gray) {
+            histogram[v.toInt() and 255]++
+        }
 
-        val background = percentile(histogram, gray.size / 2)
+        val background = percentile(
+            histogram,
+            maxOf(1, gray.size / 2)
+        )
 
         val deviations = IntArray(256)
         for (v in gray) {
-            val d = abs((v.toInt() and 255) - background)
-            deviations[d.coerceIn(0, 255)]++
+            val difference =
+                abs((v.toInt() and 255) - background)
+
+            deviations[difference.coerceIn(0, 255)]++
         }
 
-        val noise = percentile(deviations, gray.size / 2)
-        val threshold = (background + maxOf(8, noise * 4))
-            .coerceAtMost(255)
+        val noise = percentile(
+            deviations,
+            maxOf(1, gray.size / 2)
+        )
+
+        val threshold =
+            (background + maxOf(8, noise * 4)).coerceAtMost(255)
 
         val stars = ArrayList<Star>()
 
         for (y in 2 until sh - 2) {
             for (x in 2 until sw - 2) {
 
-                val value = gray[y * sw + x].toInt() and 255
+                val value =
+                    gray[y * sw + x].toInt() and 255
+
                 if (value < threshold) continue
 
                 var maximum = true
@@ -102,8 +118,13 @@ object StarAlignmentEngine {
                         val neighbor =
                             gray[ny * sw + nx].toInt() and 255
 
-                        if (neighbor > value) maximum = false
+                        if (neighbor >= value) {
+                            maximum = false
+                            break
+                        }
                     }
+
+                    if (!maximum) break
                 }
 
                 if (!maximum) continue
@@ -114,6 +135,7 @@ object StarAlignmentEngine {
 
                 for (ny in y - 2..y + 2) {
                     for (nx in x - 2..x + 2) {
+
                         val pixel =
                             gray[ny * sw + nx].toInt() and 255
 
@@ -138,7 +160,8 @@ object StarAlignmentEngine {
             }
         }
 
-        return stars.sortedByDescending { it.brightness }
+        return stars
+            .sortedByDescending { it.brightness }
             .take(maxStars)
     }
 
@@ -150,15 +173,17 @@ object StarAlignmentEngine {
     ): Transform? {
 
         val reference =
-            detectStars(referenceFile, width, height).take(60)
+            detectStars(referenceFile, width, height).take(40)
 
         val moving =
-            detectStars(movingFile, width, height).take(60)
+            detectStars(movingFile, width, height).take(40)
 
-        if (reference.size < 4 || moving.size < 4) return null
+        if (reference.size < 4 || moving.size < 4) {
+            return null
+        }
 
         val step = maxOf(1, maxOf(width, height) / 1400)
-        val radius = maxOf(3.0, step * 2.5)
+        val radius = maxOf(4.0, step * 3.0)
 
         val referencePairs = makePairs(reference, step)
         val movingPairs = makePairs(moving, step)
@@ -182,28 +207,47 @@ object StarAlignmentEngine {
         for (rp in referencePairs) {
             for (mp in movingPairs) {
 
-                val tolerance = maxOf(step * 2.5, rp.distance * 0.02)
+                val tolerance =
+                    maxOf(step * 2.5, rp.distance * 0.02)
 
                 if (abs(rp.distance - mp.distance) > tolerance) {
                     continue
                 }
 
                 val scale = rp.distance / mp.distance
-                if (scale !in 0.90..1.10) continue
 
-                val angle = normalizeAngle(rp.angle - mp.angle)
+                if (scale !in 0.90..1.10) {
+                    continue
+                }
 
+                val directAngle =
+                    normalizeAngle(rp.angle - mp.angle)
+
+                val reversedAngle =
+                    normalizeAngle(rp.angle + PI - mp.angle)
+
+                // Hipotesis pertama:
+                // moving.first dipasangkan dengan reference.first.
                 val hypotheses = listOf(
-                    Triple(mp.first, rp.first, angle),
                     Triple(
-                        mp.second,
+                        mp.first,
                         rp.first,
-                        normalizeAngle(angle - PI)
+                        directAngle
+                    ),
+
+                    // Hipotesis kedua:
+                    // moving.first dipasangkan dengan reference.second.
+                    Triple(
+                        mp.first,
+                        rp.second,
+                        reversedAngle
                     )
                 )
 
-                for ((movingIndex, referenceIndex, candidateAngle)
-                    in hypotheses) {
+                for (
+                    (movingIndex, referenceIndex, candidateAngle)
+                    in hypotheses
+                ) {
 
                     val source = moving[movingIndex]
                     val target = reference[referenceIndex]
@@ -212,45 +256,63 @@ object StarAlignmentEngine {
                     val s = sin(candidateAngle)
 
                     val dx = target.x -
-                        scale * (c * source.x - s * source.y)
+                        scale * (
+                            c * source.x -
+                            s * source.y
+                        )
 
                     val dy = target.y -
-                        scale * (s * source.x + c * source.y)
+                        scale * (
+                            s * source.x +
+                            c * source.y
+                        )
 
                     val score = scoreTransform(
-                        moving,
-                        reference,
-                        buckets,
-                        radius,
-                        scale,
-                        c,
-                        s,
-                        dx,
-                        dy
+                        moving = moving,
+                        reference = reference,
+                        buckets = buckets,
+                        radius = radius,
+                        scale = scale,
+                        c = c,
+                        s = s,
+                        dx = dx,
+                        dy = dy
                     )
 
                     if (
                         score.inliers > bestInliers ||
-                        (score.inliers == bestInliers &&
-                            score.error < bestError)
+                        (
+                            score.inliers == bestInliers &&
+                            score.error < bestError
+                        )
                     ) {
+
                         bestInliers = score.inliers
                         bestError = score.error
 
                         best = Transform(
-                            dx,
-                            dy,
-                            candidateAngle,
-                            scale,
-                            score.inliers,
-                            sqrt(score.error / score.inliers)
+                            dx = dx,
+                            dy = dy,
+                            rotationRadians = candidateAngle,
+                            scale = scale,
+                            inliers = score.inliers,
+                            rmsError = sqrt(
+                                score.error /
+                                    maxOf(1, score.inliers)
+                            )
                         )
                     }
                 }
             }
         }
 
-        return if (bestInliers >= 3) best else null
+        val result = best ?: return null
+
+        if (result.inliers < 4) return null
+        if (!result.rmsError.isFinite()) return null
+        if (result.rmsError > radius) return null
+
+        return result
     }
 
     private fun makePairs(
@@ -263,6 +325,7 @@ object StarAlignmentEngine {
 
         for (i in stars.indices) {
             for (j in i + 1 until stars.size) {
+
                 val dx = stars[j].x - stars[i].x
                 val dy = stars[j].y - stars[i].y
                 val distance = hypot(dx, dy)
@@ -271,10 +334,10 @@ object StarAlignmentEngine {
 
                 result.add(
                     PairPoint(
-                        i,
-                        j,
-                        distance,
-                        atan2(dy, dx)
+                        first = i,
+                        second = j,
+                        distance = distance,
+                        angle = atan2(dy, dx)
                     )
                 )
             }
@@ -298,11 +361,16 @@ object StarAlignmentEngine {
         val used = HashSet<Int>()
         var inliers = 0
         var error = 0.0
+
         val radiusSquared = radius * radius
 
         for (star in moving) {
-            val x = scale * (c * star.x - s * star.y) + dx
-            val y = scale * (s * star.x + c * star.y) + dy
+
+            val x =
+                scale * (c * star.x - s * star.y) + dx
+
+            val y =
+                scale * (s * star.x + c * star.y) + dy
 
             val cx = floor(x / radius).toInt()
             val cy = floor(y / radius).toInt()
@@ -312,15 +380,21 @@ object StarAlignmentEngine {
 
             for (yy in cy - 1..cy + 1) {
                 for (xx in cx - 1..cx + 1) {
-                    val indices = buckets[cellKey(xx, yy)] ?: continue
+
+                    val indices =
+                        buckets[cellKey(xx, yy)] ?: continue
 
                     for (index in indices) {
+
                         if (index in used) continue
 
                         val target = reference[index]
+
                         val ddx = target.x - x
                         val ddy = target.y - y
-                        val distance = ddx * ddx + ddy * ddy
+
+                        val distance =
+                            ddx * ddx + ddy * ddy
 
                         if (distance < bestDistance) {
                             bestDistance = distance
@@ -344,26 +418,40 @@ object StarAlignmentEngine {
         histogram: IntArray,
         target: Int
     ): Int {
+
         var count = 0
 
         for (i in histogram.indices) {
             count += histogram[i]
-            if (count >= target) return i
+
+            if (count >= target) {
+                return i
+            }
         }
 
         return 255
     }
 
     private fun normalizeAngle(angle: Double): Double {
+
         var result = angle
 
-        while (result > PI) result -= 2.0 * PI
-        while (result < -PI) result += 2.0 * PI
+        while (result > PI) {
+            result -= 2.0 * PI
+        }
+
+        while (result < -PI) {
+            result += 2.0 * PI
+        }
 
         return result
     }
 
-    private fun cellKey(x: Int, y: Int): Long {
+    private fun cellKey(
+        x: Int,
+        y: Int
+    ): Long {
+
         return (x.toLong() shl 32) or
             (y.toLong() and 0xffffffffL)
     }
