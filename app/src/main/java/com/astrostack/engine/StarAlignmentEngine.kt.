@@ -1,0 +1,370 @@
+package com.astrostack.engine
+
+import java.io.File
+import java.io.RandomAccessFile
+import kotlin.math.*
+
+object StarAlignmentEngine {
+
+    data class Star(
+        val x: Double,
+        val y: Double,
+        val brightness: Double
+    )
+
+    data class Transform(
+        val dx: Double,
+        val dy: Double,
+        val rotationRadians: Double,
+        val scale: Double,
+        val inliers: Int,
+        val rmsError: Double
+    )
+
+    private data class PairPoint(
+        val first: Int,
+        val second: Int,
+        val distance: Double,
+        val angle: Double
+    )
+
+    private data class Score(
+        val inliers: Int,
+        val error: Double
+    )
+
+    fun detectStars(
+        file: File,
+        width: Int,
+        height: Int,
+        maxStars: Int = 300
+    ): List<Star> {
+
+        require(width > 10 && height > 10)
+        require(file.exists())
+        require(file.length() >= width.toLong() * height * 4L)
+
+        val step = maxOf(1, maxOf(width, height) / 1400)
+        val sw = (width + step - 1) / step
+        val sh = (height + step - 1) / step
+        val gray = ByteArray(sw * sh)
+
+        RandomAccessFile(file, "r").use { input ->
+            val row = ByteArray(width * 4)
+
+            for (sy in 0 until sh) {
+                input.seek(sy.toLong() * width * 4L)
+                input.readFully(row)
+
+                for (sx in 0 until sw) {
+                    val offset = sx * step * 4
+
+                    val r = row[offset + 1].toInt() and 255
+                    val g = row[offset + 2].toInt() and 255
+                    val b = row[offset + 3].toInt() and 255
+
+                    gray[sy * sw + sx] =
+                        (0.299 * r + 0.587 * g + 0.114 * b)
+                            .toInt().coerceIn(0, 255).toByte()
+                }
+            }
+        }
+
+        val histogram = IntArray(256)
+        for (v in gray) histogram[v.toInt() and 255]++
+
+        val background = percentile(histogram, gray.size / 2)
+
+        val deviations = IntArray(256)
+        for (v in gray) {
+            val d = abs((v.toInt() and 255) - background)
+            deviations[d.coerceIn(0, 255)]++
+        }
+
+        val noise = percentile(deviations, gray.size / 2)
+        val threshold = (background + maxOf(8, noise * 4))
+            .coerceAtMost(255)
+
+        val stars = ArrayList<Star>()
+
+        for (y in 2 until sh - 2) {
+            for (x in 2 until sw - 2) {
+
+                val value = gray[y * sw + x].toInt() and 255
+                if (value < threshold) continue
+
+                var maximum = true
+
+                for (ny in y - 1..y + 1) {
+                    for (nx in x - 1..x + 1) {
+                        if (nx == x && ny == y) continue
+
+                        val neighbor =
+                            gray[ny * sw + nx].toInt() and 255
+
+                        if (neighbor > value) maximum = false
+                    }
+                }
+
+                if (!maximum) continue
+
+                var total = 0.0
+                var weightedX = 0.0
+                var weightedY = 0.0
+
+                for (ny in y - 2..y + 2) {
+                    for (nx in x - 2..x + 2) {
+                        val pixel =
+                            gray[ny * sw + nx].toInt() and 255
+
+                        val weight =
+                            maxOf(0, pixel - background).toDouble()
+
+                        total += weight
+                        weightedX += nx * weight
+                        weightedY += ny * weight
+                    }
+                }
+
+                if (total <= 0.0) continue
+
+                stars.add(
+                    Star(
+                        weightedX / total * step,
+                        weightedY / total * step,
+                        (value - background).toDouble()
+                    )
+                )
+            }
+        }
+
+        return stars.sortedByDescending { it.brightness }
+            .take(maxStars)
+    }
+
+    fun estimate(
+        referenceFile: File,
+        movingFile: File,
+        width: Int,
+        height: Int
+    ): Transform? {
+
+        val reference =
+            detectStars(referenceFile, width, height).take(60)
+
+        val moving =
+            detectStars(movingFile, width, height).take(60)
+
+        if (reference.size < 4 || moving.size < 4) return null
+
+        val step = maxOf(1, maxOf(width, height) / 1400)
+        val radius = maxOf(3.0, step * 2.5)
+
+        val referencePairs = makePairs(reference, step)
+        val movingPairs = makePairs(moving, step)
+
+        val buckets = HashMap<Long, MutableList<Int>>()
+
+        for (i in reference.indices) {
+            val star = reference[i]
+            val cx = floor(star.x / radius).toInt()
+            val cy = floor(star.y / radius).toInt()
+
+            buckets.getOrPut(cellKey(cx, cy)) {
+                ArrayList()
+            }.add(i)
+        }
+
+        var best: Transform? = null
+        var bestInliers = 0
+        var bestError = Double.MAX_VALUE
+
+        for (rp in referencePairs) {
+            for (mp in movingPairs) {
+
+                val tolerance = maxOf(step * 2.5, rp.distance * 0.02)
+
+                if (abs(rp.distance - mp.distance) > tolerance) {
+                    continue
+                }
+
+                val scale = rp.distance / mp.distance
+                if (scale !in 0.90..1.10) continue
+
+                val angle = normalizeAngle(rp.angle - mp.angle)
+
+                val hypotheses = listOf(
+                    Triple(mp.first, rp.first, angle),
+                    Triple(
+                        mp.second,
+                        rp.first,
+                        normalizeAngle(angle - PI)
+                    )
+                )
+
+                for ((movingIndex, referenceIndex, candidateAngle)
+                    in hypotheses) {
+
+                    val source = moving[movingIndex]
+                    val target = reference[referenceIndex]
+
+                    val c = cos(candidateAngle)
+                    val s = sin(candidateAngle)
+
+                    val dx = target.x -
+                        scale * (c * source.x - s * source.y)
+
+                    val dy = target.y -
+                        scale * (s * source.x + c * source.y)
+
+                    val score = scoreTransform(
+                        moving,
+                        reference,
+                        buckets,
+                        radius,
+                        scale,
+                        c,
+                        s,
+                        dx,
+                        dy
+                    )
+
+                    if (
+                        score.inliers > bestInliers ||
+                        (score.inliers == bestInliers &&
+                            score.error < bestError)
+                    ) {
+                        bestInliers = score.inliers
+                        bestError = score.error
+
+                        best = Transform(
+                            dx,
+                            dy,
+                            candidateAngle,
+                            scale,
+                            score.inliers,
+                            sqrt(score.error / score.inliers)
+                        )
+                    }
+                }
+            }
+        }
+
+        return if (bestInliers >= 3) best else null
+    }
+
+    private fun makePairs(
+        stars: List<Star>,
+        step: Int
+    ): List<PairPoint> {
+
+        val result = ArrayList<PairPoint>()
+        val minimumDistance = maxOf(8.0, step * 5.0)
+
+        for (i in stars.indices) {
+            for (j in i + 1 until stars.size) {
+                val dx = stars[j].x - stars[i].x
+                val dy = stars[j].y - stars[i].y
+                val distance = hypot(dx, dy)
+
+                if (distance < minimumDistance) continue
+
+                result.add(
+                    PairPoint(
+                        i,
+                        j,
+                        distance,
+                        atan2(dy, dx)
+                    )
+                )
+            }
+        }
+
+        return result
+    }
+
+    private fun scoreTransform(
+        moving: List<Star>,
+        reference: List<Star>,
+        buckets: Map<Long, List<Int>>,
+        radius: Double,
+        scale: Double,
+        c: Double,
+        s: Double,
+        dx: Double,
+        dy: Double
+    ): Score {
+
+        val used = HashSet<Int>()
+        var inliers = 0
+        var error = 0.0
+        val radiusSquared = radius * radius
+
+        for (star in moving) {
+            val x = scale * (c * star.x - s * star.y) + dx
+            val y = scale * (s * star.x + c * star.y) + dy
+
+            val cx = floor(x / radius).toInt()
+            val cy = floor(y / radius).toInt()
+
+            var bestIndex = -1
+            var bestDistance = radiusSquared
+
+            for (yy in cy - 1..cy + 1) {
+                for (xx in cx - 1..cx + 1) {
+                    val indices = buckets[cellKey(xx, yy)] ?: continue
+
+                    for (index in indices) {
+                        if (index in used) continue
+
+                        val target = reference[index]
+                        val ddx = target.x - x
+                        val ddy = target.y - y
+                        val distance = ddx * ddx + ddy * ddy
+
+                        if (distance < bestDistance) {
+                            bestDistance = distance
+                            bestIndex = index
+                        }
+                    }
+                }
+            }
+
+            if (bestIndex >= 0) {
+                used.add(bestIndex)
+                inliers++
+                error += bestDistance
+            }
+        }
+
+        return Score(inliers, error)
+    }
+
+    private fun percentile(
+        histogram: IntArray,
+        target: Int
+    ): Int {
+        var count = 0
+
+        for (i in histogram.indices) {
+            count += histogram[i]
+            if (count >= target) return i
+        }
+
+        return 255
+    }
+
+    private fun normalizeAngle(angle: Double): Double {
+        var result = angle
+
+        while (result > PI) result -= 2.0 * PI
+        while (result < -PI) result += 2.0 * PI
+
+        return result
+    }
+
+    private fun cellKey(x: Int, y: Int): Long {
+        return (x.toLong() shl 32) or
+            (y.toLong() and 0xffffffffL)
+    }
+}
