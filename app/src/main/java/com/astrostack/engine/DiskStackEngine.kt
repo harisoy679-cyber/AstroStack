@@ -4,6 +4,7 @@ import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
+import java.io.OutputStream
 import kotlin.math.*
 
 object DiskStackEngine {
@@ -50,8 +51,8 @@ object DiskStackEngine {
         val right: Int,
         val bottom: Int
     ) {
-        val width: Int get() = right - left + 1
-        val height: Int get() = bottom - top + 1
+        val width get() = right - left + 1
+        val height get() = bottom - top + 1
     }
 
     private data class Region(
@@ -75,19 +76,21 @@ object DiskStackEngine {
         val step = maxOf(1, maxOf(width, height) / 1200)
         val sw = (width + step - 1) / step
         val sh = (height + step - 1) / step
-
         val gray = ByteArray(sw * sh)
 
         RandomAccessFile(file, "r").use { input ->
+
             val row = ByteArray(width * 4)
 
             for (sy in 0 until sh) {
+
                 val sourceY = min(sy * step, height - 1)
 
                 input.seek(sourceY.toLong() * width * 4L)
                 input.readFully(row)
 
                 for (sx in 0 until sw) {
+
                     val sourceX = min(sx * step, width - 1)
                     val offset = sourceX * 4
 
@@ -112,6 +115,7 @@ object DiskStackEngine {
         var background = 0
 
         for (i in histogram.indices) {
+
             accumulated += histogram[i]
 
             if (accumulated >= gray.size / 2) {
@@ -194,84 +198,258 @@ object DiskStackEngine {
     ): Transform? {
 
         val reference =
-            detectStars(referenceFile, width, height)
+            detectStars(referenceFile, width, height, 150)
 
         val moving =
-            detectStars(movingFile, width, height)
+            detectStars(movingFile, width, height, 150)
 
-        if (reference.size < 3 || moving.size < 3) {
+        if (reference.size < 4 || moving.size < 4) {
             return null
         }
 
+        val step = maxOf(1, maxOf(width, height) / 1200)
+        val tolerance = max(8.0, step * 5.0)
+        val toleranceSquared = tolerance * tolerance
+
         val ref = reference.take(40)
         val mov = moving.take(40)
+
+        data class PairMatch(
+            val moving: Star,
+            val reference: Star,
+            val distance: Double
+        )
+
+        fun match(
+            dx: Double,
+            dy: Double,
+            a: Double,
+            b: Double
+        ): List<PairMatch> {
+
+            val used = HashSet<Int>()
+            val result = ArrayList<PairMatch>()
+
+            for (star in mov) {
+
+                val tx = a * star.x - b * star.y + dx
+                val ty = b * star.x + a * star.y + dy
+
+                var bestIndex = -1
+                var bestDistance = toleranceSquared
+
+                for (i in ref.indices) {
+
+                    if (i in used) continue
+
+                    val ddx = ref[i].x - tx
+                    val ddy = ref[i].y - ty
+                    val distance = ddx * ddx + ddy * ddy
+
+                    if (distance < bestDistance) {
+                        bestDistance = distance
+                        bestIndex = i
+                    }
+                }
+
+                if (bestIndex >= 0) {
+
+                    used.add(bestIndex)
+
+                    result.add(
+                        PairMatch(
+                            star,
+                            ref[bestIndex],
+                            bestDistance
+                        )
+                    )
+                }
+            }
+
+            return result
+        }
+
+        fun fit(pairs: List<PairMatch>): Transform? {
+
+            if (pairs.size < 4) return null
+
+            val count = pairs.size.toDouble()
+
+            val mx = pairs.sumOf { it.moving.x } / count
+            val my = pairs.sumOf { it.moving.y } / count
+            val rx = pairs.sumOf { it.reference.x } / count
+            val ry = pairs.sumOf { it.reference.y } / count
+
+            var denominator = 0.0
+            var numeratorA = 0.0
+            var numeratorB = 0.0
+
+            for (p in pairs) {
+
+                val x = p.moving.x - mx
+                val y = p.moving.y - my
+
+                val u = p.reference.x - rx
+                val v = p.reference.y - ry
+
+                denominator += x * x + y * y
+                numeratorA += x * u + y * v
+                numeratorB += x * v - y * u
+            }
+
+            if (denominator < 1e-9) return null
+
+            val a = numeratorA / denominator
+            val b = numeratorB / denominator
+
+            val scale = sqrt(a * a + b * b)
+
+            if (!scale.isFinite() || scale !in 0.85..1.15) {
+                return null
+            }
+
+            val dx = rx - (a * mx - b * my)
+            val dy = ry - (b * mx + a * my)
+
+            val rotation = atan2(b, a)
+
+            val rms = sqrt(
+                pairs.sumOf { p ->
+
+                    val x = a * p.moving.x -
+                        b * p.moving.y + dx
+
+                    val y = b * p.moving.x +
+                        a * p.moving.y + dy
+
+                    val ex = p.reference.x - x
+                    val ey = p.reference.y - y
+
+                    ex * ex + ey * ey
+
+                } / count
+            )
+
+            return Transform(
+                dx,
+                dy,
+                rotation,
+                scale,
+                pairs.size,
+                rms
+            )
+        }
 
         var best: Transform? = null
         var bestScore = 0
         var bestError = Double.MAX_VALUE
 
-        for (a in mov) {
-            for (b in ref) {
+        val candidates = mov.take(20)
+        val targets = ref.take(20)
 
-                val dx = b.x - a.x
-                val dy = b.y - a.y
+        for (i in candidates.indices) {
+            for (j in i + 1 until candidates.size) {
 
-                var score = 0
-                var error = 0.0
+                val p1 = candidates[i]
+                val p2 = candidates[j]
 
-                val used = HashSet<Int>()
+                val vx = p2.x - p1.x
+                val vy = p2.y - p1.y
+                val movingDistance = hypot(vx, vy)
 
-                for (star in mov) {
+                if (movingDistance < step * 20.0) continue
 
-                    val tx = star.x + dx
-                    val ty = star.y + dy
+                for (k in targets.indices) {
+                    for (l in k + 1 until targets.size) {
 
-                    var nearest = -1
-                    var nearestDistance = 25.0
+                        val q1 = targets[k]
+                        val q2 = targets[l]
 
-                    for (i in ref.indices) {
+                        val wx = q2.x - q1.x
+                        val wy = q2.y - q1.y
 
-                        if (i in used) continue
+                        val referenceDistance = hypot(wx, wy)
 
-                        val ddx = ref[i].x - tx
-                        val ddy = ref[i].y - ty
-                        val distance = ddx * ddx + ddy * ddy
+                        if (referenceDistance < step * 20.0) continue
 
-                        if (distance < nearestDistance) {
-                            nearestDistance = distance
-                            nearest = i
+                        val scale =
+                            referenceDistance / movingDistance
+
+                        if (scale !in 0.85..1.15) continue
+
+                        val denominator = vx * vx + vy * vy
+
+                        val a =
+                            (wx * vx + wy * vy) / denominator
+
+                        val b =
+                            (wy * vx - wx * vy) / denominator
+
+                        val dx =
+                            q1.x - (a * p1.x - b * p1.y)
+
+                        val dy =
+                            q1.y - (b * p1.x + a * p1.y)
+
+                        val matches = match(dx, dy, a, b)
+
+                        if (matches.size < 4) continue
+
+                        val error = matches.sumOf { it.distance }
+
+                        if (
+                            matches.size > bestScore ||
+                            (matches.size == bestScore &&
+                                error < bestError)
+                        ) {
+
+                            bestScore = matches.size
+                            bestError = error
+
+                            best = Transform(
+                                dx,
+                                dy,
+                                atan2(b, a),
+                                scale,
+                                matches.size,
+                                sqrt(error / matches.size)
+                            )
                         }
                     }
-
-                    if (nearest >= 0) {
-                        used.add(nearest)
-                        score++
-                        error += nearestDistance
-                    }
-                }
-
-                if (
-                    score > bestScore ||
-                    (score == bestScore && error < bestError)
-                ) {
-                    bestScore = score
-                    bestError = error
-
-                    best = Transform(
-                        dx = dx,
-                        dy = dy,
-                        rotationRadians = 0.0,
-                        scale = 1.0,
-                        inliers = score,
-                        rmsError = sqrt(error / max(1, score))
-                    )
                 }
             }
         }
 
-        val result = best ?: return null
+        var result = best ?: return null
 
-        return if (result.inliers >= 3) result else null
+        repeat(3) {
+
+            val a =
+                result.scale * cos(result.rotationRadians)
+
+            val b =
+                result.scale * sin(result.rotationRadians)
+
+            val pairs = match(
+                result.dx,
+                result.dy,
+                a,
+                b
+            )
+
+            val refined = fit(pairs) ?: return@repeat
+
+            if (refined.inliers < 4) return@repeat
+
+            result = refined
+        }
+
+        return if (
+            result.inliers >= 4 &&
+            result.rmsError <= tolerance &&
+            result.dx.isFinite() &&
+            result.dy.isFinite()
+        ) result else null
     }
 
     fun stackFiles(
@@ -327,6 +505,7 @@ object DiskStackEngine {
         }
 
         actualTransforms.forEach {
+
             require(
                 it.dx.isFinite() &&
                 it.dy.isFinite() &&
@@ -352,6 +531,7 @@ object DiskStackEngine {
         var rejected = 0L
 
         try {
+
             BufferedOutputStream(
                 FileOutputStream(outputFile)
             ).use { output ->
@@ -419,7 +599,9 @@ object DiskStackEngine {
                     tileY += rows
                 }
             }
+
         } finally {
+
             inputs.forEach {
                 try {
                     it.close()
@@ -636,6 +818,7 @@ object DiskStackEngine {
         val fy = y - y0
 
         fun pixel(px: Int, py: Int): Int {
+
             val o = (py * region.width + px) * 4
 
             val a = region.data[o].toInt() and 255
@@ -685,6 +868,7 @@ object DiskStackEngine {
         var sum = 0.0
 
         for (i in tiles.indices) {
+
             val v =
                 ((tiles[i][pixel] ushr shift) and 255).toDouble()
 
@@ -751,7 +935,7 @@ object DiskStackEngine {
     }
 
     private fun writeInt(
-        output: java.io.OutputStream,
+        output: OutputStream,
         value: Int
     ) {
         output.write((value ushr 24) and 255)
@@ -782,6 +966,7 @@ object DiskStackEngine {
         require(pixelOffset + byteCount <= 0xffffffffL)
 
         RandomAccessFile(rawFile, "r").use { input ->
+
             BufferedOutputStream(
                 FileOutputStream(outputFile)
             ).use { output ->
