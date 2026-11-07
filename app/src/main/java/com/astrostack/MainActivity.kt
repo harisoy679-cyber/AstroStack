@@ -1,4 +1,3 @@
-
 package com.astrostack
 
 import android.app.Activity
@@ -13,8 +12,10 @@ import android.os.Environment
 import android.view.ViewGroup
 import android.widget.*
 import com.astrostack.engine.DiskStackEngine
+import com.tssystems.Libraw
 import java.io.BufferedOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import kotlin.concurrent.thread
@@ -55,9 +56,7 @@ class MainActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(22, 24, 22, 20)
-            setBackgroundColor(
-                android.graphics.Color.rgb(12, 17, 29)
-            )
+            setBackgroundColor(android.graphics.Color.rgb(12, 17, 29))
         }
 
         root.addView(label("AstroStack", 30f))
@@ -67,10 +66,7 @@ class MainActivity : Activity() {
             adapter = ArrayAdapter(
                 this@MainActivity,
                 android.R.layout.simple_spinner_dropdown_item,
-                listOf(
-                    "Astro — Deep Sky",
-                    "Planet — Planetary"
-                )
+                listOf("Astro — Deep Sky", "Planet — Planetary")
             )
         }
 
@@ -81,31 +77,23 @@ class MainActivity : Activity() {
             adapter = ArrayAdapter(
                 this@MainActivity,
                 android.R.layout.simple_spinner_dropdown_item,
-                listOf(
-                    "Average",
-                    "Median",
-                    "Sigma Clipping (2.5σ)"
-                )
+                listOf("Average", "Median", "Sigma Clipping (2.5σ)")
             )
         }
 
         root.addView(label("STACK METHOD"))
         root.addView(method)
 
-        root.addView(
-            button("Pilih LIGHT frames") {
-                chooseLights()
-            }
-        )
+        root.addView(button("Pilih LIGHT frames") {
+            chooseLights()
+        })
 
         count = label("Belum ada foto dipilih")
         root.addView(count)
 
-        root.addView(
-            button("MULAI STACKING") {
-                startStack()
-            }
-        )
+        root.addView(button("MULAI STACKING") {
+            startStack()
+        })
 
         preview = ImageView(this).apply {
             adjustViewBounds = true
@@ -124,17 +112,15 @@ class MainActivity : Activity() {
         status = label("Pilih minimal dua foto.")
         root.addView(status)
 
-        root.addView(
-            button("SIMPAN TIFF 16-BIT") {
-                saveTiff()
-            }
-        )
+        root.addView(button("SIMPAN TIFF 16-BIT") {
+            saveTiff()
+        })
 
         root.addView(
             label(
-                "Alignment translasi sederhana (beta). " +
-                "Rotasi/skala otomatis, RAW, Dark/Flat/Bias, " +
-                "dan ekspor PNG belum tersedia.",
+                "RAW menggunakan LibRaw. " +
+                "Output sementara masih 8-bit. " +
+                "Calibration frames dan ekspor PNG belum tersedia.",
                 12f
             )
         )
@@ -149,9 +135,10 @@ class MainActivity : Activity() {
     private fun chooseLights() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = "image/*"
+            type = "*/*"
             putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         }
+
         startActivityForResult(intent, 41)
     }
 
@@ -205,17 +192,27 @@ class MainActivity : Activity() {
         return File(parent, "AstroStack").apply { mkdirs() }
     }
 
-    private fun decodeToRaw(
-        uri: Uri,
+    private fun copyUriToFile(uri: Uri, destination: File) {
+        val input = contentResolver.openInputStream(uri)
+            ?: throw Exception("Tidak dapat membuka file.")
+
+        input.use { source ->
+            FileOutputStream(destination).use { output ->
+                source.copyTo(output)
+            }
+        }
+    }
+
+    private fun decodeWithAndroid(
+        source: File,
         destination: File
     ): Pair<Int, Int> {
 
-        val input = contentResolver.openInputStream(uri)
-            ?: throw Exception("Tidak dapat membuka gambar.")
+        val input = FileInputStream(source)
 
         val decoder = try {
             BitmapRegionDecoder.newInstance(input, false)
-                ?: throw Exception("Format gambar tidak didukung.")
+                ?: throw Exception("Decoder Android tidak mendukung format ini.")
         } catch (e: Throwable) {
             input.close()
             throw e
@@ -227,10 +224,7 @@ class MainActivity : Activity() {
 
             require(width > 0 && height > 0)
 
-            BufferedOutputStream(
-                FileOutputStream(destination)
-            ).use { output ->
-
+            BufferedOutputStream(FileOutputStream(destination)).use { output ->
                 val tileRows = 32
                 var y = 0
 
@@ -243,22 +237,15 @@ class MainActivity : Activity() {
                     }
 
                     val bitmap = decoder.decodeRegion(rect, options)
-                        ?: throw Exception(
-                            "Gagal membaca bagian gambar."
-                        )
+                        ?: throw Exception("Gagal membaca bagian gambar.")
 
                     try {
                         val pixels =
                             IntArray(bitmap.width * bitmap.height)
 
                         bitmap.getPixels(
-                            pixels,
-                            0,
-                            bitmap.width,
-                            0,
-                            0,
-                            bitmap.width,
-                            bitmap.height
+                            pixels, 0, bitmap.width,
+                            0, 0, bitmap.width, bitmap.height
                         )
 
                         for (pixel in pixels) {
@@ -276,10 +263,99 @@ class MainActivity : Activity() {
             }
 
             return Pair(width, height)
-
         } finally {
             decoder.recycle()
             input.close()
+        }
+    }
+
+    private fun decodeWithLibraw(
+        source: File,
+        destination: File
+    ): Pair<Int, Int> {
+
+        val raw = Libraw()
+
+        try {
+            val openResult = raw.open(source.absolutePath)
+
+            if (openResult != 0) {
+                throw Exception("LibRaw gagal membuka RAW. Kode: $openResult")
+            }
+
+            raw.setOutputBps(8)
+            raw.setAutoWhitebalance(true)
+            raw.setAutoBrightness(false)
+
+            val pixels = raw.getPixels8()
+                ?: throw Exception("LibRaw gagal mendekode piksel RAW.")
+
+            val width = raw.getBitmapWidth()
+            val height = raw.getBitmapHeight()
+
+            if (width <= 0 || height <= 0) {
+                throw Exception("Dimensi RAW tidak valid.")
+            }
+
+            val expected = width.toLong() * height.toLong()
+
+            if (expected != pixels.size.toLong()) {
+                throw Exception(
+                    "Jumlah piksel RAW tidak cocok. " +
+                    "Ukuran: ${width}x${height}, data: ${pixels.size}"
+                )
+            }
+
+            BufferedOutputStream(FileOutputStream(destination)).use { output ->
+                for (pixel in pixels) {
+                    output.write((pixel ushr 24) and 255)
+                    output.write((pixel ushr 16) and 255)
+                    output.write((pixel ushr 8) and 255)
+                    output.write(pixel and 255)
+                }
+            }
+
+            return Pair(width, height)
+
+        } finally {
+            try {
+                raw.cleanup()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun decodeToRaw(
+        uri: Uri,
+        destination: File
+    ): Pair<Int, Int> {
+
+        val source = File(
+            workDir(),
+            "source_${System.currentTimeMillis()}_${destination.name}"
+        )
+
+        try {
+            copyUriToFile(uri, source)
+
+            try {
+                return decodeWithAndroid(source, destination)
+            } catch (androidError: Exception) {
+                destination.delete()
+
+                try {
+                    return decodeWithLibraw(source, destination)
+                } catch (rawError: Exception) {
+                    destination.delete()
+
+                    throw Exception(
+                        "Decoder Android: ${androidError.message}\n" +
+                        "Decoder LibRaw: ${rawError.message}"
+                    )
+                }
+            }
+        } finally {
+            source.delete()
         }
     }
 
@@ -328,10 +404,7 @@ class MainActivity : Activity() {
         }
 
         return Bitmap.createBitmap(
-            pixels,
-            pw,
-            ph,
-            Bitmap.Config.ARGB_8888
+            pixels, pw, ph, Bitmap.Config.ARGB_8888
         )
     }
 
@@ -364,7 +437,6 @@ class MainActivity : Activity() {
                 var width = 0
                 var height = 0
 
-                // Tahap 1: Membaca semua foto.
                 for (i in selectedUris.indices) {
                     runOnUiThread {
                         status.text =
@@ -378,10 +450,7 @@ class MainActivity : Activity() {
 
                     temporaryFiles.add(file)
 
-                    val dimensions = decodeToRaw(
-                        selectedUris[i],
-                        file
-                    )
+                    val dimensions = decodeToRaw(selectedUris[i], file)
 
                     if (i == 0) {
                         width = dimensions.first
@@ -396,7 +465,6 @@ class MainActivity : Activity() {
                     }
                 }
 
-                // Tahap 2: Alignment bintang.
                 runOnUiThread {
                     status.text = "Mendeteksi dan menyelaraskan bintang..."
                 }
@@ -406,7 +474,6 @@ class MainActivity : Activity() {
                 val transforms =
                     mutableListOf<DiskStackEngine.Transform>()
 
-                // Foto pertama menjadi foto referensi.
                 alignedFiles.add(temporaryFiles.first())
 
                 transforms.add(
@@ -435,7 +502,8 @@ class MainActivity : Activity() {
                         height = height
                     )
 
-                    if (transform != null &&
+                    if (
+                        transform != null &&
                         transform.inliers >= 3 &&
                         transform.dx.isFinite() &&
                         transform.dy.isFinite() &&
@@ -451,21 +519,18 @@ class MainActivity : Activity() {
                 if (alignedFiles.size < 2) {
                     throw Exception(
                         "Alignment hanya berhasil pada satu foto. " +
-                        "Bintang tidak cukup terdeteksi atau " +
-                        "pergeseran antarfoto terlalu besar. " +
-                        "Coba gunakan foto dengan lebih banyak bintang."
+                        "Bintang tidak cukup terdeteksi atau pergeseran " +
+                        "antarfoto terlalu besar."
                     )
                 }
 
-                // Tahap 3: Stacking dengan hasil alignment.
                 val output = File(
                     workDir(),
                     "result_${System.currentTimeMillis()}.argb"
                 )
 
                 runOnUiThread {
-                    status.text =
-                        "Stacking ${alignedFiles.size} foto..."
+                    status.text = "Stacking ${alignedFiles.size} foto..."
                 }
 
                 val result = DiskStackEngine.stackFiles(
@@ -478,7 +543,6 @@ class MainActivity : Activity() {
                     tileRows = 16
                 )
 
-                // Tahap 4: Membuat preview.
                 val bitmap = createPreview(
                     result.outputFile,
                     result.width,
@@ -499,8 +563,7 @@ class MainActivity : Activity() {
                         "Berhasil alignment: ${alignedFiles.size}\n" +
                         "Dilewati: $skippedFrames\n" +
                         "Resolusi: ${result.width} × ${result.height}\n" +
-                        "Kanal ditolak: ${result.rejectedPixels}\n" +
-                        "Preview ditampilkan dalam ukuran kecil."
+                        "Kanal ditolak: ${result.rejectedPixels}"
                 }
 
             } catch (e: OutOfMemoryError) {
