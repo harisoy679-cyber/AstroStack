@@ -784,11 +784,20 @@ object DiskStackEngine {
                     transform
                 )
 
-                destination[index++] = sample(
-                    region,
-                    source.first,
-                    source.second
-                )
+                val sx = source.first
+                val sy = source.second
+
+                destination[index++] =
+                    if (
+                        sx >= region.x &&
+                        sy >= region.y &&
+                        sx <= region.x + region.width - 1.0 &&
+                        sy <= region.y + region.height - 1.0
+                    ) {
+                        sample(region, sx, sy)
+                    } else {
+                        0
+                    }
             }
         }
     }
@@ -799,15 +808,17 @@ object DiskStackEngine {
         sourceY: Double
     ): Int {
 
-        val x = (sourceX - region.x).coerceIn(
-            0.0,
-            (region.width - 1).toDouble()
-        )
+        val x = sourceX - region.x
+        val y = sourceY - region.y
 
-        val y = (sourceY - region.y).coerceIn(
-            0.0,
-            (region.height - 1).toDouble()
-        )
+        if (
+            x < 0.0 ||
+            y < 0.0 ||
+            x > region.width - 1.0 ||
+            y > region.height - 1.0
+        ) {
+            return 0
+        }
 
         val x0 = floor(x).toInt()
         val y0 = floor(y).toInt()
@@ -821,14 +832,11 @@ object DiskStackEngine {
 
             val o = (py * region.width + px) * 4
 
-            val a = region.data[o].toInt() and 255
             val r = region.data[o + 1].toInt() and 255
             val g = region.data[o + 2].toInt() and 255
             val b = region.data[o + 3].toInt() and 255
 
-            return (a shl 24) or
-                (r shl 16) or
-                (g shl 8) or b
+            return (r shl 16) or (g shl 8) or b
         }
 
         val p00 = pixel(x0, y0)
@@ -843,11 +851,12 @@ object DiskStackEngine {
             val c = ((p01 ushr shift) and 255).toDouble()
             val d = ((p11 ushr shift) and 255).toDouble()
 
-            val top = a * (1 - fx) + b * fx
-            val bottom = c * (1 - fx) + d * fx
+            val top = a * (1.0 - fx) + b * fx
+            val bottom = c * (1.0 - fx) + d * fx
 
-            return (top * (1 - fy) + bottom * fy)
-                .roundToInt().coerceIn(0, 255)
+            return (top * (1.0 - fy) + bottom * fy)
+                .roundToInt()
+                .coerceIn(0, 255)
         }
 
         return (255 shl 24) or
@@ -865,31 +874,41 @@ object DiskStackEngine {
         values: DoubleArray
     ): Pair<Int, Long> {
 
+        var count = 0
         var sum = 0.0
 
         for (i in tiles.indices) {
 
-            val v =
-                ((tiles[i][pixel] ushr shift) and 255).toDouble()
+            val packed = tiles[i][pixel]
 
-            values[i] = v
-            sum += v
+            // Alpha 0 berarti piksel tidak memiliki data sumber.
+            if ((packed ushr 24) == 0) continue
+
+            val value =
+                ((packed ushr shift) and 255).toDouble()
+
+            values[count++] = value
+            sum += value
+        }
+
+        if (count == 0) {
+            return 0 to 0L
         }
 
         var rejected = 0L
 
         val result = when (method) {
 
-            Method.AVERAGE -> sum / values.size
+            Method.AVERAGE -> sum / count
 
             Method.MEDIAN -> {
 
-                val sorted = values.clone()
+                val sorted = values.copyOf(count)
                 sorted.sort()
 
-                val middle = sorted.size / 2
+                val middle = count / 2
 
-                if (sorted.size % 2 == 1) {
+                if (count % 2 == 1) {
                     sorted[middle]
                 } else {
                     (sorted[middle - 1] + sorted[middle]) / 2.0
@@ -898,19 +917,22 @@ object DiskStackEngine {
 
             Method.SIGMA_CLIP -> {
 
-                val mean = sum / values.size
+                val mean = sum / count
                 var variance = 0.0
 
-                for (v in values) {
+                for (i in 0 until count) {
+                    val v = values[i]
                     variance += (v - mean) * (v - mean)
                 }
 
-                val sd = sqrt(variance / values.size)
+                val sd = sqrt(variance / count)
 
                 var keptSum = 0.0
                 var keptCount = 0
 
-                for (v in values) {
+                for (i in 0 until count) {
+
+                    val v = values[i]
 
                     if (
                         sd < 1e-9 ||
