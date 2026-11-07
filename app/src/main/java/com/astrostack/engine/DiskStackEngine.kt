@@ -50,8 +50,8 @@ object DiskStackEngine {
         val right: Int,
         val bottom: Int
     ) {
-        val width get() = right - left + 1
-        val height get() = bottom - top + 1
+        val width: Int get() = right - left + 1
+        val height: Int get() = bottom - top + 1
     }
 
     private data class Region(
@@ -62,7 +62,7 @@ object DiskStackEngine {
         val data: ByteArray
     )
 
-    fun detectStars(
+    private fun detectStars(
         file: File,
         width: Int,
         height: Int,
@@ -103,6 +103,7 @@ object DiskStackEngine {
         }
 
         val histogram = IntArray(256)
+
         gray.forEach {
             histogram[it.toInt() and 255]++
         }
@@ -112,6 +113,7 @@ object DiskStackEngine {
 
         for (i in histogram.indices) {
             accumulated += histogram[i]
+
             if (accumulated >= gray.size / 2) {
                 background = i
                 break
@@ -125,12 +127,14 @@ object DiskStackEngine {
             for (x in 2 until sw - 2) {
 
                 val value = gray[y * sw + x].toInt() and 255
+
                 if (value < threshold) continue
 
                 var maximum = true
 
                 for (ny in y - 1..y + 1) {
                     for (nx in x - 1..x + 1) {
+
                         if (nx == x && ny == y) continue
 
                         val neighbor =
@@ -141,6 +145,7 @@ object DiskStackEngine {
                             break
                         }
                     }
+
                     if (!maximum) break
                 }
 
@@ -152,6 +157,7 @@ object DiskStackEngine {
 
                 for (ny in y - 2..y + 2) {
                     for (nx in x - 2..x + 2) {
+
                         val pixel =
                             gray[ny * sw + nx].toInt() and 255
 
@@ -187,10 +193,15 @@ object DiskStackEngine {
         height: Int
     ): Transform? {
 
-        val reference = detectStars(referenceFile, width, height)
-        val moving = detectStars(movingFile, width, height)
+        val reference =
+            detectStars(referenceFile, width, height)
 
-        if (reference.size < 3 || moving.size < 3) return null
+        val moving =
+            detectStars(movingFile, width, height)
+
+        if (reference.size < 3 || moving.size < 3) {
+            return null
+        }
 
         val ref = reference.take(40)
         val mov = moving.take(40)
@@ -219,6 +230,7 @@ object DiskStackEngine {
                     var nearestDistance = 25.0
 
                     for (i in ref.indices) {
+
                         if (i in used) continue
 
                         val ddx = ref[i].x - tx
@@ -258,6 +270,7 @@ object DiskStackEngine {
         }
 
         val result = best ?: return null
+
         return if (result.inliers >= 3) result else null
     }
 
@@ -285,12 +298,15 @@ object DiskStackEngine {
         }
 
         val actualTransforms = when {
+
             transforms.isNotEmpty() -> {
                 require(transforms.size == frameFiles.size)
                 transforms
             }
+
             shifts.isNotEmpty() -> {
                 require(shifts.size == frameFiles.size)
+
                 shifts.map {
                     Transform(
                         it.dx.toDouble(),
@@ -302,8 +318,11 @@ object DiskStackEngine {
                     )
                 }
             }
-            else -> List(frameFiles.size) {
-                Transform(0.0, 0.0, 0.0, 1.0, 0, 0.0)
+
+            else -> {
+                List(frameFiles.size) {
+                    Transform(0.0, 0.0, 0.0, 1.0, 0, 0.0)
+                }
             }
         }
 
@@ -317,7 +336,8 @@ object DiskStackEngine {
             )
         }
 
-        val bounds = calculateBounds(width, height, actualTransforms)
+        val bounds =
+            calculateBounds(width, height, actualTransforms)
 
         require(bounds.width > 0 && bounds.height > 0) {
             "Area alignment tidak valid."
@@ -325,11 +345,16 @@ object DiskStackEngine {
 
         outputFile.parentFile?.mkdirs()
 
-        val inputs = frameFiles.map { RandomAccessFile(it, "r") }
+        val inputs = frameFiles.map {
+            RandomAccessFile(it, "r")
+        }
+
         var rejected = 0L
 
         try {
-            BufferedOutputStream(FileOutputStream(outputFile)).use { output ->
+            BufferedOutputStream(
+                FileOutputStream(outputFile)
+            ).use { output ->
 
                 var tileY = 0
 
@@ -343,6 +368,7 @@ object DiskStackEngine {
                     }
 
                     for (i in inputs.indices) {
+
                         val region = readRegion(
                             inputs[i],
                             width,
@@ -367,9 +393,17 @@ object DiskStackEngine {
 
                     for (p in 0 until pixelCount) {
 
-                        val r = calculate(tiles, p, 16, method, sigma, values)
-                        val g = calculate(tiles, p, 8, method, sigma, values)
-                        val b = calculate(tiles, p, 0, method, sigma, values)
+                        val r = calculate(
+                            tiles, p, 16, method, sigma, values
+                        )
+
+                        val g = calculate(
+                            tiles, p, 8, method, sigma, values
+                        )
+
+                        val b = calculate(
+                            tiles, p, 0, method, sigma, values
+                        )
 
                         rejected += r.second + g.second + b.second
 
@@ -398,7 +432,11 @@ object DiskStackEngine {
             bounds.width,
             bounds.height,
             actualTransforms.map {
-                Shift(it.dx.roundToInt(), it.dy.roundToInt(), it.inliers.toDouble())
+                Shift(
+                    it.dx.roundToInt(),
+                    it.dy.roundToInt(),
+                    it.inliers.toDouble()
+                )
             },
             rejected,
             outputFile,
@@ -411,6 +449,7 @@ object DiskStackEngine {
         y: Double,
         t: Transform
     ): Pair<Double, Double> {
+
         val c = cos(t.rotationRadians)
         val s = sin(t.rotationRadians)
 
@@ -425,8 +464,10 @@ object DiskStackEngine {
         y: Double,
         t: Transform
     ): Pair<Double, Double> {
+
         val dx = x - t.dx
         val dy = y - t.dy
+
         val c = cos(t.rotationRadians)
         val s = sin(t.rotationRadians)
 
@@ -448,6 +489,7 @@ object DiskStackEngine {
         var bottom = Double.POSITIVE_INFINITY
 
         for (t in transforms) {
+
             val corners = listOf(
                 transformPoint(0.0, 0.0, t),
                 transformPoint(width - 1.0, 0.0, t),
@@ -480,7 +522,7 @@ object DiskStackEngine {
     ): Region {
 
         val x0 = bounds.left.toDouble()
-        val x1 = (bounds.right).toDouble()
+        val x1 = bounds.right.toDouble()
         val y0 = (bounds.top + tileY).toDouble()
         val y1 = (bounds.top + tileY + rows - 1).toDouble()
 
@@ -491,10 +533,25 @@ object DiskStackEngine {
             inversePoint(x1, y1, transform)
         )
 
-        val minX = max(0, floor(corners.minOf { it.first }).toInt() - 1)
-        val minY = max(0, floor(corners.minOf { it.second }).toInt() - 1)
-        val maxX = min(imageWidth - 1, ceil(corners.maxOf { it.first }).toInt() + 1)
-        val maxY = min(imageHeight - 1, ceil(corners.maxOf { it.second }).toInt() + 1)
+        val minX = max(
+            0,
+            floor(corners.minOf { it.first }).toInt() - 1
+        )
+
+        val minY = max(
+            0,
+            floor(corners.minOf { it.second }).toInt() - 1
+        )
+
+        val maxX = min(
+            imageWidth - 1,
+            ceil(corners.maxOf { it.first }).toInt() + 1
+        )
+
+        val maxY = min(
+            imageHeight - 1,
+            ceil(corners.maxOf { it.second }).toInt() + 1
+        )
 
         require(maxX >= minX && maxY >= minY) {
             "Area sumber alignment berada di luar foto."
@@ -502,15 +559,23 @@ object DiskStackEngine {
 
         val rw = maxX - minX + 1
         val rh = maxY - minY + 1
-        val bytes = ByteArray((rw.toLong() * rh * 4L).toInt())
-        val row = ByteArray(rw * 4)
 
+        val bytes = ByteArray(
+            (rw.toLong() * rh * 4L).toInt()
+        )
+
+        val row = ByteArray(rw * 4)
         var offset = 0
 
         for (y in 0 until rh) {
-            input.seek(((minY + y).toLong() * imageWidth + minX) * 4L)
+
+            input.seek(
+                ((minY + y).toLong() * imageWidth + minX) * 4L
+            )
+
             input.readFully(row)
             System.arraycopy(row, 0, bytes, offset, row.size)
+
             offset += row.size
         }
 
@@ -552,8 +617,15 @@ object DiskStackEngine {
         sourceY: Double
     ): Int {
 
-        val x = (sourceX - region.x).coerceIn(0.0, (region.width - 1).toDouble())
-        val y = (sourceY - region.y).coerceIn(0.0, (region.height - 1).toDouble())
+        val x = (sourceX - region.x).coerceIn(
+            0.0,
+            (region.width - 1).toDouble()
+        )
+
+        val y = (sourceY - region.y).coerceIn(
+            0.0,
+            (region.height - 1).toDouble()
+        )
 
         val x0 = floor(x).toInt()
         val y0 = floor(y).toInt()
@@ -565,11 +637,15 @@ object DiskStackEngine {
 
         fun pixel(px: Int, py: Int): Int {
             val o = (py * region.width + px) * 4
+
             val a = region.data[o].toInt() and 255
             val r = region.data[o + 1].toInt() and 255
             val g = region.data[o + 2].toInt() and 255
             val b = region.data[o + 3].toInt() and 255
-            return (a shl 24) or (r shl 16) or (g shl 8) or b
+
+            return (a shl 24) or
+                (r shl 16) or
+                (g shl 8) or b
         }
 
         val p00 = pixel(x0, y0)
@@ -578,6 +654,7 @@ object DiskStackEngine {
         val p11 = pixel(x1, y1)
 
         fun channel(shift: Int): Int {
+
             val a = ((p00 ushr shift) and 255).toDouble()
             val b = ((p10 ushr shift) and 255).toDouble()
             val c = ((p01 ushr shift) and 255).toDouble()
@@ -608,7 +685,9 @@ object DiskStackEngine {
         var sum = 0.0
 
         for (i in tiles.indices) {
-            val v = ((tiles[i][pixel] ushr shift) and 255).toDouble()
+            val v =
+                ((tiles[i][pixel] ushr shift) and 255).toDouble()
+
             values[i] = v
             sum += v
         }
@@ -620,8 +699,10 @@ object DiskStackEngine {
             Method.AVERAGE -> sum / values.size
 
             Method.MEDIAN -> {
+
                 val sorted = values.clone()
                 sorted.sort()
+
                 val middle = sorted.size / 2
 
                 if (sorted.size % 2 == 1) {
@@ -632,6 +713,7 @@ object DiskStackEngine {
             }
 
             Method.SIGMA_CLIP -> {
+
                 val mean = sum / values.size
                 var variance = 0.0
 
@@ -640,11 +722,16 @@ object DiskStackEngine {
                 }
 
                 val sd = sqrt(variance / values.size)
+
                 var keptSum = 0.0
                 var keptCount = 0
 
                 for (v in values) {
-                    if (sd < 1e-9 || abs(v - mean) <= sigma * sd) {
+
+                    if (
+                        sd < 1e-9 ||
+                        abs(v - mean) <= sigma * sd
+                    ) {
                         keptSum += v
                         keptCount++
                     } else {
@@ -652,7 +739,11 @@ object DiskStackEngine {
                     }
                 }
 
-                if (keptCount > 0) keptSum / keptCount else mean
+                if (keptCount > 0) {
+                    keptSum / keptCount
+                } else {
+                    mean
+                }
             }
         }
 
@@ -691,7 +782,9 @@ object DiskStackEngine {
         require(pixelOffset + byteCount <= 0xffffffffL)
 
         RandomAccessFile(rawFile, "r").use { input ->
-            BufferedOutputStream(FileOutputStream(outputFile)).use { output ->
+            BufferedOutputStream(
+                FileOutputStream(outputFile)
+            ).use { output ->
 
                 fun u16(v: Int) {
                     output.write(v and 255)
@@ -703,7 +796,12 @@ object DiskStackEngine {
                     u16(((v ushr 16) and 65535).toInt())
                 }
 
-                fun entry(tag: Int, type: Int, count: Long, value: Long) {
+                fun entry(
+                    tag: Int,
+                    type: Int,
+                    count: Long,
+                    value: Long
+                ) {
                     u16(tag)
                     u16(type)
                     u32(count)
@@ -728,21 +826,32 @@ object DiskStackEngine {
                 entry(284, 3, 1, 1)
 
                 u32(0)
-                repeat(3) { u16(16) }
+
+                repeat(3) {
+                    u16(16)
+                }
 
                 val buffer = ByteArray(4 * 4096)
                 var remaining = width.toLong() * height
 
                 while (remaining > 0) {
+
                     val count = min(4096L, remaining).toInt()
+
                     input.readFully(buffer, 0, count * 4)
 
                     var offset = 0
 
                     repeat(count) {
-                        val r = buffer[offset + 1].toInt() and 255
-                        val g = buffer[offset + 2].toInt() and 255
-                        val b = buffer[offset + 3].toInt() and 255
+
+                        val r =
+                            buffer[offset + 1].toInt() and 255
+
+                        val g =
+                            buffer[offset + 2].toInt() and 255
+
+                        val b =
+                            buffer[offset + 3].toInt() and 255
 
                         u16(r * 257)
                         u16(g * 257)
