@@ -1,4 +1,3 @@
-
 package com.astrostack
 
 import android.app.Activity
@@ -9,6 +8,7 @@ import android.graphics.BitmapRegionDecoder
 import android.graphics.Rect
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.view.ViewGroup
 import android.widget.*
 import com.astrostack.engine.DiskStackEngine
@@ -33,6 +33,7 @@ class MainActivity : Activity() {
     private var resultFile: File? = null
     private var resultWidth = 0
     private var resultHeight = 0
+    private var isProcessing = false
 
     private fun label(text: String, size: Float = 15f) =
         TextView(this).apply {
@@ -59,9 +60,7 @@ class MainActivity : Activity() {
         }
 
         root.addView(label("AstroStack", 30f))
-        root.addView(
-            label("Disk-based astrophotography stacking", 13f)
-        )
+        root.addView(label("Astrophotography Image Stacker", 13f))
 
         mode = Spinner(this).apply {
             adapter = ArrayAdapter(
@@ -93,16 +92,16 @@ class MainActivity : Activity() {
         root.addView(method)
 
         root.addView(
-            button("Pilih LIGHT frames (multi-select)") {
+            button("Pilih LIGHT frames") {
                 chooseLights()
             }
         )
 
-        count = label("Belum ada light frame")
+        count = label("Belum ada foto dipilih")
         root.addView(count)
 
         root.addView(
-            button("Mulai stacking") {
+            button("MULAI STACKING") {
                 startStack()
             }
         )
@@ -121,21 +120,18 @@ class MainActivity : Activity() {
             )
         )
 
-        status = label(
-            "Pilih minimal dua gambar JPG, PNG, atau format lain yang didukung Android."
-        )
-
+        status = label("Pilih minimal dua foto.")
         root.addView(status)
 
         root.addView(
-            button("Simpan hasil TIFF 16-bit") {
+            button("SIMPAN TIFF 16-BIT") {
                 saveTiff()
             }
         )
 
         root.addView(
             label(
-                "Catatan: Alignment otomatis, kalibrasi, RAW, dan PNG belum aktif.",
+                "Fitur yang belum tersedia: RAW, Dark/Flat/Bias, alignment otomatis, dan PNG.",
                 12f
             )
         )
@@ -166,88 +162,67 @@ class MainActivity : Activity() {
         resultCode: Int,
         data: Intent?
     ) {
-        super.onActivityResult(
-            requestCode,
-            resultCode,
-            data
-        )
+        super.onActivityResult(requestCode, resultCode, data)
 
-        if (resultCode != Activity.RESULT_OK || data == null) {
-            return
-        }
+        if (resultCode != RESULT_OK || data == null) return
 
         if (requestCode == 41) {
 
             lightUris.clear()
 
-            try {
-                data.clipData?.let { clip ->
+            data.clipData?.let { clip ->
 
-                    for (i in 0 until clip.itemCount) {
-                        val uri = clip.getItemAt(i).uri
-                        lightUris.add(uri)
-
-                        try {
-                            contentResolver.takePersistableUriPermission(
-                                uri,
-                                Intent.FLAG_GRANT_READ_URI_PERMISSION
-                            )
-                        } catch (_: Exception) {
-                        }
-                    }
-
-                } ?: data.data?.let { uri ->
-
-                    lightUris.add(uri)
-
-                    try {
-                        contentResolver.takePersistableUriPermission(
-                            uri,
-                            Intent.FLAG_GRANT_READ_URI_PERMISSION
-                        )
-                    } catch (_: Exception) {
-                    }
+                for (i in 0 until clip.itemCount) {
+                    addImageUri(clip.getItemAt(i).uri, data)
                 }
 
-            } catch (e: Exception) {
-                status.text = "Gagal memilih gambar: ${e.message}"
-                return
+            } ?: data.data?.let {
+                addImageUri(it, data)
             }
 
-            count.text =
-                "${lightUris.size} light frame dipilih"
-
+            count.text = "${lightUris.size} foto dipilih"
             resultFile = null
             preview.setImageBitmap(null)
         }
     }
 
+    private fun addImageUri(uri: Uri, data: Intent) {
+
+        lightUris.add(uri)
+
+        try {
+            val flags = data.flags and
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+
+            contentResolver.takePersistableUriPermission(
+                uri,
+                flags
+            )
+        } catch (_: Exception) {
+        }
+    }
+
     private fun workDir(): File {
-        return File(
-            getExternalFilesDir(null),
-            "AstroStack/work"
-        ).apply {
+        return File(cacheDir, "AstroStack").apply {
             mkdirs()
         }
     }
 
     private fun outputDir(): File {
-        return File(
-            getExternalFilesDir(
-                android.os.Environment.DIRECTORY_PICTURES
-            ),
-            "AstroStack"
-        ).apply {
+        val parent = getExternalFilesDir(
+            Environment.DIRECTORY_PICTURES
+        ) ?: filesDir
+
+        return File(parent, "AstroStack").apply {
             mkdirs()
         }
     }
 
-    /**
-     * Decode the original image in horizontal strips.
-     * No complete full-resolution IntArray is created.
-     *
-     * Raw format: A, R, G, B bytes.
+    /*
+     * Membaca gambar sedikit demi sedikit.
+     * Tidak membuat satu IntArray besar untuk seluruh foto.
      */
+
     private fun decodeToRaw(
         uri: Uri,
         destination: File
@@ -256,9 +231,12 @@ class MainActivity : Activity() {
         val input = contentResolver.openInputStream(uri)
             ?: throw Exception("Tidak dapat membuka gambar.")
 
-        val decoder = input.use {
-            BitmapRegionDecoder.newInstance(it, false)
+        val decoder = try {
+            BitmapRegionDecoder.newInstance(input, false)
                 ?: throw Exception("Format gambar tidak didukung.")
+        } catch (e: Throwable) {
+            input.close()
+            throw e
         }
 
         try {
@@ -272,16 +250,12 @@ class MainActivity : Activity() {
                 FileOutputStream(destination)
             ).use { output ->
 
-                val rowsPerTile = 32
-
+                val tileRows = 32
                 var y = 0
 
                 while (y < height) {
 
-                    val rows = min(
-                        rowsPerTile,
-                        height - y
-                    )
+                    val rows = min(tileRows, height - y)
 
                     val rect = Rect(
                         0,
@@ -298,7 +272,7 @@ class MainActivity : Activity() {
                         rect,
                         options
                     ) ?: throw Exception(
-                        "Gagal membaca bagian gambar pada baris $y."
+                        "Gagal membaca bagian gambar."
                     )
 
                     try {
@@ -318,22 +292,10 @@ class MainActivity : Activity() {
                         )
 
                         for (pixel in pixels) {
-
-                            output.write(
-                                (pixel ushr 24) and 255
-                            )
-
-                            output.write(
-                                (pixel ushr 16) and 255
-                            )
-
-                            output.write(
-                                (pixel ushr 8) and 255
-                            )
-
-                            output.write(
-                                pixel and 255
-                            )
+                            output.write((pixel ushr 24) and 255)
+                            output.write((pixel ushr 16) and 255)
+                            output.write((pixel ushr 8) and 255)
+                            output.write(pixel and 255)
                         }
 
                     } finally {
@@ -348,12 +310,15 @@ class MainActivity : Activity() {
 
         } finally {
             decoder.recycle()
+            input.close()
         }
     }
 
-    /**
-     * Build a small preview directly from the raw disk file.
+    /*
+     * Membuat preview kecil dari file hasil stacking.
+     * File hasil asli tidak diperkecil.
      */
+
     private fun createPreview(
         file: File,
         width: Int,
@@ -368,45 +333,33 @@ class MainActivity : Activity() {
             )
         )
 
-        val previewWidth = (width + sample - 1) / sample
-        val previewHeight = (height + sample - 1) / sample
+        val pw = (width + sample - 1) / sample
+        val ph = (height + sample - 1) / sample
 
-        val pixels = IntArray(
-            previewWidth * previewHeight
-        )
+        val pixels = IntArray(pw * ph)
 
         RandomAccessFile(file, "r").use { input ->
 
-            val rowBytes = ByteArray(width * 4)
+            val row = ByteArray(width * 4)
 
-            for (py in 0 until previewHeight) {
+            for (py in 0 until ph) {
 
-                val sourceY = min(
-                    py * sample,
-                    height - 1
-                )
+                val sy = min(py * sample, height - 1)
 
-                input.seek(
-                    sourceY.toLong() * width * 4L
-                )
+                input.seek(sy.toLong() * width * 4L)
+                input.readFully(row)
 
-                input.readFully(rowBytes)
+                for (px in 0 until pw) {
 
-                for (px in 0 until previewWidth) {
+                    val sx = min(px * sample, width - 1)
+                    val offset = sx * 4
 
-                    val sourceX = min(
-                        px * sample,
-                        width - 1
-                    )
+                    val a = row[offset].toInt() and 255
+                    val r = row[offset + 1].toInt() and 255
+                    val g = row[offset + 2].toInt() and 255
+                    val b = row[offset + 3].toInt() and 255
 
-                    val offset = sourceX * 4
-
-                    val a = rowBytes[offset].toInt() and 255
-                    val r = rowBytes[offset + 1].toInt() and 255
-                    val g = rowBytes[offset + 2].toInt() and 255
-                    val b = rowBytes[offset + 3].toInt() and 255
-
-                    pixels[py * previewWidth + px] =
+                    pixels[py * pw + px] =
                         (a shl 24) or
                         (r shl 16) or
                         (g shl 8) or b
@@ -415,34 +368,25 @@ class MainActivity : Activity() {
         }
 
         return Bitmap.createBitmap(
-            previewWidth,
-            previewHeight,
+            pixels,
+            pw,
+            ph,
             Bitmap.Config.ARGB_8888
-        ).apply {
-            setPixels(
-                pixels,
-                0,
-                previewWidth,
-                0,
-                0,
-                previewWidth,
-                previewHeight
-            )
-        }
+        )
     }
 
     private fun startStack() {
 
+        if (isProcessing) return
+
         if (lightUris.size < 2) {
-            status.text = "Pilih minimal dua frame."
+            status.text = "Pilih minimal dua foto."
             return
         }
 
         val selectedUris = lightUris.toList()
 
-        val selectedMethod = when (
-            method.selectedItemPosition
-        ) {
+        val selectedMethod = when (method.selectedItemPosition) {
             1 -> DiskStackEngine.Method.MEDIAN
             2 -> DiskStackEngine.Method.SIGMA_CLIP
             else -> DiskStackEngine.Method.AVERAGE
@@ -450,7 +394,9 @@ class MainActivity : Activity() {
 
         val selectedMode = mode.selectedItem.toString()
 
-        status.text = "Menyiapkan gambar..."
+        isProcessing = true
+        resultFile = null
+        status.text = "Memulai proses..."
 
         thread {
 
@@ -458,19 +404,19 @@ class MainActivity : Activity() {
 
             try {
 
-                var imageWidth = 0
-                var imageHeight = 0
+                var width = 0
+                var height = 0
 
                 for (i in selectedUris.indices) {
 
                     runOnUiThread {
                         status.text =
-                            "Membaca frame ${i + 1}/${selectedUris.size}..."
+                            "Membaca foto ${i + 1}/${selectedUris.size}..."
                     }
 
                     val file = File(
                         workDir(),
-                        "input_${System.currentTimeMillis()}_$i.argb"
+                        "frame_${System.currentTimeMillis()}_$i.argb"
                     )
 
                     temporaryFiles.add(file)
@@ -481,37 +427,37 @@ class MainActivity : Activity() {
                     )
 
                     if (i == 0) {
-                        imageWidth = dimensions.first
-                        imageHeight = dimensions.second
+                        width = dimensions.first
+                        height = dimensions.second
                     } else {
                         require(
-                            dimensions.first == imageWidth &&
-                            dimensions.second == imageHeight
+                            dimensions.first == width &&
+                            dimensions.second == height
                         ) {
-                            "Semua gambar harus memiliki dimensi sama."
+                            "Semua foto harus memiliki ukuran yang sama."
                         }
                     }
                 }
 
-                val resultFilePath = File(
+                val output = File(
                     workDir(),
                     "result_${System.currentTimeMillis()}.argb"
                 )
 
                 runOnUiThread {
-                    status.text = "Sedang stacking..."
+                    status.text = "Sedang melakukan stacking..."
                 }
 
                 val result = DiskStackEngine.stackFiles(
                     frameFiles = temporaryFiles,
-                    width = imageWidth,
-                    height = imageHeight,
-                    outputFile = resultFilePath,
+                    width = width,
+                    height = height,
+                    outputFile = output,
                     method = selectedMethod,
                     tileRows = 32
                 )
 
-                val smallPreview = createPreview(
+                val bitmap = createPreview(
                     result.outputFile,
                     result.width,
                     result.height
@@ -523,29 +469,28 @@ class MainActivity : Activity() {
 
                 runOnUiThread {
 
-                    preview.setImageBitmap(smallPreview)
+                    preview.setImageBitmap(bitmap)
 
                     status.text =
-                        "Stacking selesai.\n" +
+                        "STACKING SELESAI\n" +
                         "Mode: $selectedMode\n" +
-                        "Frame: ${selectedUris.size}\n" +
+                        "Jumlah foto: ${selectedUris.size}\n" +
                         "Resolusi: ${result.width} × ${result.height}\n" +
-                        "Pixel ditolak: ${result.rejectedPixels}\n" +
-                        "Alignment otomatis belum aktif."
+                        "Nilai kanal ditolak: ${result.rejectedPixels}\n" +
+                        "Preview ditampilkan dalam ukuran kecil."
                 }
 
             } catch (e: OutOfMemoryError) {
 
                 runOnUiThread {
                     status.text =
-                        "Memori tidak cukup saat membaca atau membuat preview."
+                        "Memori tidak cukup. Coba kurangi jumlah foto."
                 }
 
             } catch (e: Exception) {
 
                 runOnUiThread {
-                    status.text =
-                        "Gagal: ${e.message}"
+                    status.text = "Gagal: ${e.message}"
                 }
 
             } finally {
@@ -555,6 +500,10 @@ class MainActivity : Activity() {
                         it.delete()
                     } catch (_: Exception) {
                     }
+                }
+
+                runOnUiThread {
+                    isProcessing = false
                 }
             }
         }
@@ -569,7 +518,10 @@ class MainActivity : Activity() {
             return
         }
 
-        status.text = "Menyimpan TIFF 16-bit..."
+        if (isProcessing) return
+
+        isProcessing = true
+        status.text = "Menyimpan TIFF..."
 
         thread {
 
@@ -597,6 +549,12 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     status.text =
                         "Gagal menyimpan TIFF: ${e.message}"
+                }
+
+            } finally {
+
+                runOnUiThread {
+                    isProcessing = false
                 }
             }
         }
