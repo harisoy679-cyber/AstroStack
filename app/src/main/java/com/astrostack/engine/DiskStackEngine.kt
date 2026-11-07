@@ -1,14 +1,10 @@
 package com.astrostack.engine
 
 import java.io.BufferedOutputStream
-import java.io.DataOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
-import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.sqrt
+import kotlin.math.*
 
 object DiskStackEngine {
 
@@ -29,13 +25,28 @@ object DiskStackEngine {
         val height: Int,
         val shifts: List<Shift>,
         val rejectedPixels: Long,
-        val outputFile: File
+        val outputFile: File,
+        val transforms: List<StarAlignmentEngine.Transform> = emptyList()
     )
 
-    /**
-     * File format:
-     * 4 bytes per pixel, ARGB, big-endian.
-     */
+    private data class Bounds(
+        val left: Int,
+        val top: Int,
+        val right: Int,
+        val bottom: Int
+    ) {
+        val width get() = right - left + 1
+        val height get() = bottom - top + 1
+    }
+
+    private data class SourceRegion(
+        val x: Int,
+        val y: Int,
+        val width: Int,
+        val height: Int,
+        val data: ByteArray
+    )
+
     fun stackFiles(
         frameFiles: List<File>,
         width: Int,
@@ -44,16 +55,16 @@ object DiskStackEngine {
         method: Method = Method.AVERAGE,
         shifts: List<Shift> = emptyList(),
         sigma: Double = 2.5,
-        tileRows: Int = 32
+        tileRows: Int = 32,
+        transforms: List<StarAlignmentEngine.Transform> = emptyList()
     ): Result {
 
         require(frameFiles.size >= 2) {
             "Pilih minimal dua frame."
         }
-
         require(width > 0 && height > 0)
         require(tileRows > 0)
-        require(sigma > 0)
+        require(sigma > 0.0 && sigma.isFinite())
 
         val expectedSize = width.toLong() * height * 4L
 
@@ -63,22 +74,54 @@ object DiskStackEngine {
             }
         }
 
-        val actualShifts = if (shifts.isEmpty()) {
-            List(frameFiles.size) { Shift() }
-        } else {
-            require(shifts.size == frameFiles.size)
-            shifts
+        val actualTransforms = when {
+            transforms.isNotEmpty() -> {
+                require(transforms.size == frameFiles.size) {
+                    "Jumlah transformasi tidak sama dengan jumlah foto."
+                }
+                transforms
+            }
+
+            else -> {
+                val actualShifts = if (shifts.isEmpty()) {
+                    List(frameFiles.size) { Shift() }
+                } else {
+                    require(shifts.size == frameFiles.size)
+                    shifts
+                }
+
+                actualShifts.map {
+                    StarAlignmentEngine.Transform(
+                        dx = it.dx.toDouble(),
+                        dy = it.dy.toDouble(),
+                        rotationRadians = 0.0,
+                        scale = 1.0,
+                        inliers = 0,
+                        rmsError = 0.0
+                    )
+                }
+            }
         }
 
-        val left = actualShifts.maxOf { max(0, -it.dx) }
-        val right = actualShifts.maxOf { max(0, it.dx) }
-        val top = actualShifts.maxOf { max(0, -it.dy) }
-        val bottom = actualShifts.maxOf { max(0, it.dy) }
+        actualTransforms.forEach {
+            require(
+                it.dx.isFinite() &&
+                it.dy.isFinite() &&
+                it.rotationRadians.isFinite() &&
+                it.scale.isFinite() &&
+                it.scale > 0.0
+            ) {
+                "Transformasi foto tidak valid."
+            }
+        }
 
-        val outWidth = width - left - right
-        val outHeight = height - top - bottom
+        val bounds = calculateBounds(
+            width,
+            height,
+            actualTransforms
+        )
 
-        require(outWidth > 0 && outHeight > 0) {
+        require(bounds.width > 0 && bounds.height > 0) {
             "Area gambar setelah alignment tidak valid."
         }
 
@@ -91,34 +134,40 @@ object DiskStackEngine {
         var rejected = 0L
 
         try {
-            DataOutputStream(
-                BufferedOutputStream(
-                    FileOutputStream(outputFile)
-                )
+            BufferedOutputStream(
+                FileOutputStream(outputFile)
             ).use { output ->
 
                 var tileY = 0
 
-                while (tileY < outHeight) {
+                while (tileY < bounds.height) {
 
-                    val rows = min(tileRows, outHeight - tileY)
-                    val pixelCount = outWidth * rows
+                    val rows = min(tileRows, bounds.height - tileY)
+                    val pixelCount = bounds.width * rows
 
                     val tiles = Array(frameFiles.size) {
                         IntArray(pixelCount)
                     }
 
                     for (i in inputs.indices) {
-                        val shift = actualShifts[i]
 
-                        readTile(
-                            inputs[i],
-                            width,
-                            left + shift.dx,
-                            top + tileY + shift.dy,
-                            outWidth,
-                            rows,
-                            tiles[i]
+                        val region = readTransformedRegion(
+                            input = inputs[i],
+                            imageWidth = width,
+                            imageHeight = height,
+                            bounds = bounds,
+                            tileY = tileY,
+                            tileRows = rows,
+                            transform = actualTransforms[i]
+                        )
+
+                        renderTransformedTile(
+                            region = region,
+                            bounds = bounds,
+                            tileY = tileY,
+                            tileRows = rows,
+                            transform = actualTransforms[i],
+                            destination = tiles[i]
                         )
                     }
 
@@ -127,18 +176,15 @@ object DiskStackEngine {
                     for (p in 0 until pixelCount) {
 
                         val red = calculate(
-                            tiles, p, 16,
-                            method, sigma, values
+                            tiles, p, 16, method, sigma, values
                         )
 
                         val green = calculate(
-                            tiles, p, 8,
-                            method, sigma, values
+                            tiles, p, 8, method, sigma, values
                         )
 
                         val blue = calculate(
-                            tiles, p, 0,
-                            method, sigma, values
+                            tiles, p, 0, method, sigma, values
                         )
 
                         rejected += red.second
@@ -151,7 +197,7 @@ object DiskStackEngine {
                             (green.first shl 8) or
                             blue.first
 
-                        output.writeInt(pixel)
+                        writeIntBigEndian(output, pixel)
                     }
 
                     tileY += rows
@@ -166,53 +212,306 @@ object DiskStackEngine {
             }
         }
 
+        val resultShifts = actualTransforms.map {
+            Shift(
+                dx = it.dx.roundToInt(),
+                dy = it.dy.roundToInt(),
+                score = it.inliers.toDouble()
+            )
+        }
+
         return Result(
-            outWidth,
-            outHeight,
-            actualShifts,
-            rejected,
-            outputFile
+            width = bounds.width,
+            height = bounds.height,
+            shifts = resultShifts,
+            rejectedPixels = rejected,
+            outputFile = outputFile,
+            transforms = actualTransforms
         )
     }
 
-    private fun readTile(
+    private fun calculateBounds(
+        width: Int,
+        height: Int,
+        transforms: List<StarAlignmentEngine.Transform>
+    ): Bounds {
+
+        var commonLeft = Double.NEGATIVE_INFINITY
+        var commonTop = Double.NEGATIVE_INFINITY
+        var commonRight = Double.POSITIVE_INFINITY
+        var commonBottom = Double.POSITIVE_INFINITY
+
+        for (t in transforms) {
+
+            val corners = listOf(
+                Pair(0.0, 0.0),
+                Pair((width - 1).toDouble(), 0.0),
+                Pair(0.0, (height - 1).toDouble()),
+                Pair((width - 1).toDouble(), (height - 1).toDouble())
+            )
+
+            val mapped = corners.map { (x, y) ->
+                transformPoint(x, y, t)
+            }
+
+            commonLeft = max(
+                commonLeft,
+                mapped.minOf { it.first }
+            )
+
+            commonTop = max(
+                commonTop,
+                mapped.minOf { it.second }
+            )
+
+            commonRight = min(
+                commonRight,
+                mapped.maxOf { it.first }
+            )
+
+            commonBottom = min(
+                commonBottom,
+                mapped.maxOf { it.second }
+            )
+        }
+
+        require(
+            commonLeft.isFinite() &&
+            commonTop.isFinite() &&
+            commonRight.isFinite() &&
+            commonBottom.isFinite()
+        ) {
+            "Batas alignment tidak valid."
+        }
+
+        return Bounds(
+            left = ceil(commonLeft).toInt(),
+            top = ceil(commonTop).toInt(),
+            right = floor(commonRight).toInt(),
+            bottom = floor(commonBottom).toInt()
+        )
+    }
+
+    private fun transformPoint(
+        x: Double,
+        y: Double,
+        t: StarAlignmentEngine.Transform
+    ): Pair<Double, Double> {
+
+        val c = cos(t.rotationRadians)
+        val s = sin(t.rotationRadians)
+
+        return Pair(
+            t.scale * (c * x - s * y) + t.dx,
+            t.scale * (s * x + c * y) + t.dy
+        )
+    }
+
+    private fun inversePoint(
+        x: Double,
+        y: Double,
+        t: StarAlignmentEngine.Transform
+    ): Pair<Double, Double> {
+
+        val dx = x - t.dx
+        val dy = y - t.dy
+
+        val c = cos(t.rotationRadians)
+        val s = sin(t.rotationRadians)
+
+        return Pair(
+            (c * dx + s * dy) / t.scale,
+            (-s * dx + c * dy) / t.scale
+        )
+    }
+
+    private fun readTransformedRegion(
         input: RandomAccessFile,
         imageWidth: Int,
-        x: Int,
-        y: Int,
-        tileWidth: Int,
-        tileHeight: Int,
-        destination: IntArray
-    ) {
+        imageHeight: Int,
+        bounds: Bounds,
+        tileY: Int,
+        tileRows: Int,
+        transform: StarAlignmentEngine.Transform
+    ): SourceRegion {
 
-        val rowBytes = ByteArray(tileWidth * 4)
-        var target = 0
+        val outputLeft = bounds.left.toDouble()
+        val outputRight = bounds.left + bounds.width - 1.0
+        val outputTop = (bounds.top + tileY).toDouble()
+        val outputBottom = outputTop + tileRows - 1.0
 
-        for (row in 0 until tileHeight) {
+        val corners = listOf(
+            inversePoint(outputLeft, outputTop, transform),
+            inversePoint(outputRight, outputTop, transform),
+            inversePoint(outputLeft, outputBottom, transform),
+            inversePoint(outputRight, outputBottom, transform)
+        )
+
+        val minX = max(
+            0,
+            floor(corners.minOf { it.first }).toInt() - 1
+        )
+
+        val minY = max(
+            0,
+            floor(corners.minOf { it.second }).toInt() - 1
+        )
+
+        val maxX = min(
+            imageWidth - 1,
+            ceil(corners.maxOf { it.first }).toInt() + 1
+        )
+
+        val maxY = min(
+            imageHeight - 1,
+            ceil(corners.maxOf { it.second }).toInt() + 1
+        )
+
+        require(maxX >= minX && maxY >= minY) {
+            "Area sumber alignment berada di luar foto."
+        }
+
+        val regionWidth = maxX - minX + 1
+        val regionHeight = maxY - minY + 1
+
+        val byteCount = regionWidth.toLong() *
+            regionHeight.toLong() * 4L
+
+        require(byteCount <= Int.MAX_VALUE) {
+            "Area pemrosesan terlalu besar."
+        }
+
+        val data = ByteArray(byteCount.toInt())
+        val rowBytes = ByteArray(regionWidth * 4)
+
+        var destinationOffset = 0
+
+        for (row in 0 until regionHeight) {
 
             val position =
-                ((y + row).toLong() * imageWidth + x) * 4L
+                ((minY + row).toLong() * imageWidth + minX) * 4L
 
             input.seek(position)
             input.readFully(rowBytes)
 
-            var offset = 0
+            System.arraycopy(
+                rowBytes,
+                0,
+                data,
+                destinationOffset,
+                rowBytes.size
+            )
 
-            for (column in 0 until tileWidth) {
+            destinationOffset += rowBytes.size
+        }
 
-                val a = rowBytes[offset].toInt() and 255
-                val r = rowBytes[offset + 1].toInt() and 255
-                val g = rowBytes[offset + 2].toInt() and 255
-                val b = rowBytes[offset + 3].toInt() and 255
+        return SourceRegion(
+            minX,
+            minY,
+            regionWidth,
+            regionHeight,
+            data
+        )
+    }
 
-                destination[target++] =
-                    (a shl 24) or
-                    (r shl 16) or
-                    (g shl 8) or b
+    private fun renderTransformedTile(
+        region: SourceRegion,
+        bounds: Bounds,
+        tileY: Int,
+        tileRows: Int,
+        transform: StarAlignmentEngine.Transform,
+        destination: IntArray
+    ) {
 
-                offset += 4
+        var outputIndex = 0
+
+        for (row in 0 until tileRows) {
+
+            val targetY = (bounds.top + tileY + row).toDouble()
+
+            for (column in 0 until bounds.width) {
+
+                val targetX = (bounds.left + column).toDouble()
+
+                val source = inversePoint(
+                    targetX,
+                    targetY,
+                    transform
+                )
+
+                destination[outputIndex++] =
+                    bilinearSample(
+                        region,
+                        source.first,
+                        source.second
+                    )
             }
         }
+    }
+
+    private fun bilinearSample(
+        region: SourceRegion,
+        sourceX: Double,
+        sourceY: Double
+    ): Int {
+
+        val x = (sourceX - region.x)
+            .coerceIn(0.0, (region.width - 1).toDouble())
+
+        val y = (sourceY - region.y)
+            .coerceIn(0.0, (region.height - 1).toDouble())
+
+        val x0 = floor(x).toInt()
+        val y0 = floor(y).toInt()
+
+        val x1 = min(x0 + 1, region.width - 1)
+        val y1 = min(y0 + 1, region.height - 1)
+
+        val fx = x - x0
+        val fy = y - y0
+
+        val p00 = readPixel(region, x0, y0)
+        val p10 = readPixel(region, x1, y0)
+        val p01 = readPixel(region, x0, y1)
+        val p11 = readPixel(region, x1, y1)
+
+        fun channel(shift: Int): Int {
+
+            val a = ((p00 ushr shift) and 255).toDouble()
+            val b = ((p10 ushr shift) and 255).toDouble()
+            val c = ((p01 ushr shift) and 255).toDouble()
+            val d = ((p11 ushr shift) and 255).toDouble()
+
+            val top = a * (1.0 - fx) + b * fx
+            val bottom = c * (1.0 - fx) + d * fx
+
+            return (
+                top * (1.0 - fy) + bottom * fy
+            ).roundToInt().coerceIn(0, 255)
+        }
+
+        return (0xFF shl 24) or
+            (channel(16) shl 16) or
+            (channel(8) shl 8) or
+            channel(0)
+    }
+
+    private fun readPixel(
+        region: SourceRegion,
+        x: Int,
+        y: Int
+    ): Int {
+
+        val offset = (y * region.width + x) * 4
+
+        val a = region.data[offset].toInt() and 255
+        val r = region.data[offset + 1].toInt() and 255
+        val g = region.data[offset + 2].toInt() and 255
+        val b = region.data[offset + 3].toInt() and 255
+
+        return (a shl 24) or
+            (r shl 16) or
+            (g shl 8) or b
     }
 
     private fun calculate(
@@ -227,7 +526,10 @@ object DiskStackEngine {
         var sum = 0.0
 
         for (i in tiles.indices) {
-            val v = ((tiles[i][pixel] ushr shift) and 255).toDouble()
+            val v = (
+                (tiles[i][pixel] ushr shift) and 255
+            ).toDouble()
+
             values[i] = v
             sum += v
         }
@@ -257,7 +559,6 @@ object DiskStackEngine {
             Method.SIGMA_CLIP -> {
 
                 val mean = sum / values.size
-
                 var variance = 0.0
 
                 for (v in values) {
@@ -271,7 +572,10 @@ object DiskStackEngine {
                 var keptCount = 0
 
                 for (v in values) {
-                    if (sd < 1e-9 || abs(v - mean) <= sigma * sd) {
+                    if (
+                        sd < 1e-9 ||
+                        abs(v - mean) <= sigma * sd
+                    ) {
                         keptSum += v
                         keptCount++
                     } else {
@@ -290,10 +594,16 @@ object DiskStackEngine {
         return result.toInt().coerceIn(0, 255) to rejected
     }
 
-    /**
-     * Exports the raw ARGB result to uncompressed RGB TIFF.
-     * The 8-bit values are expanded to 16-bit.
-     */
+    private fun writeIntBigEndian(
+        output: java.io.OutputStream,
+        value: Int
+    ) {
+        output.write((value ushr 24) and 255)
+        output.write((value ushr 16) and 255)
+        output.write((value ushr 8) and 255)
+        output.write(value and 255)
+    }
+
     fun writeTiff16(
         rawFile: File,
         width: Int,
@@ -302,6 +612,7 @@ object DiskStackEngine {
     ) {
 
         require(rawFile.isFile)
+        require(width > 0 && height > 0)
         require(rawFile.length() == width.toLong() * height * 4L)
 
         outputFile.parentFile?.mkdirs()
@@ -312,6 +623,10 @@ object DiskStackEngine {
         val bitsOffset = ifdOffset + ifdSize
         val pixelOffset = bitsOffset + 6L
         val byteCount = width.toLong() * height * 6L
+
+        require(pixelOffset + byteCount <= 0xffffffffL) {
+            "Ukuran terlalu besar untuk format TIFF klasik."
+        }
 
         RandomAccessFile(rawFile, "r").use { input ->
 
