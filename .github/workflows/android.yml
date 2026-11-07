@@ -1,3 +1,4 @@
+
 name: Build AstroStack APK
 
 on:
@@ -32,6 +33,32 @@ jobs:
       - name: Download LibRaw Android source
         run: |
           git clone --depth 1 https://github.com/TSGames/Libraw-Android.git /tmp/Libraw-Android
+
+      - name: Fix LibRaw source paths
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("/tmp/Libraw-Android/jni/libraw/Android.mk")
+          s = p.read_text()
+
+          start = s.index("FILE_LIST :=")
+          end = s.index("#FILE_LIST:= libraw.cpp", start)
+
+          replacement = """FILE_LIST := swab.c \\
+          libraw.c \\
+          ../src/internal/dcraw_common.cpp \\
+          ../src/internal/dcraw_fileio.cpp \\
+          ../src/internal/demosaic_packs.cpp \\
+          ../src/src/libraw_datastream.cpp \\
+          ../src/src/libraw_cxx.cpp \\
+          ../src/src/libraw_c_api.cpp
+          """
+
+          s = s[:start] + replacement + s[end:]
+          p.write_text(s)
+          print("LibRaw source paths fixed")
+          PY
 
       - name: Build LibRaw
         run: |
