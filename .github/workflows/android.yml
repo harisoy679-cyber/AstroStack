@@ -27,7 +27,34 @@ jobs:
 
       - name: Install NDK and CMake
         run: |
-          sdkmanager --install "ndk;27.2.12479018" "cmake;3.22.1"
+          sdkmanager --install "ndk;29.0.13846066" "cmake;3.22.1"
+
+      - name: Download LibRaw Android source
+        run: |
+          git clone --depth 1 https://github.com/TSGames/Libraw-Android.git /tmp/Libraw-Android
+
+      - name: Build LibRaw
+        run: |
+          NDK="$ANDROID_HOME/ndk/29.0.13846066"
+          cd /tmp/Libraw-Android
+
+          "$NDK/ndk-build" \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=jni/Android.mk \
+            NDK_APPLICATION_MK=jni/Application.mk \
+            NDK_LIBS_OUT=libs \
+            NDK_OUT=obj
+
+      - name: Copy LibRaw libraries
+        run: |
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          mkdir -p app/src/main/jniLibs/armeabi-v7a
+
+          cp /tmp/Libraw-Android/libs/arm64-v8a/liblibraw.so \
+             app/src/main/jniLibs/arm64-v8a/
+
+          cp /tmp/Libraw-Android/libs/armeabi-v7a/liblibraw.so \
+             app/src/main/jniLibs/armeabi-v7a/
 
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
