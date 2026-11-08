@@ -60,6 +60,145 @@ jobs:
           print("LibRaw source paths fixed")
           PY
 
+      - name: Fix LibRaw JNI pixel decoder
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("/tmp/Libraw-Android/jni/libraw/libraw.c")
+          s = p.read_text()
+
+          start = s.index(
+              "JNIEXPORT jintArray JNICALL Java_com_tssystems_Libraw_getPixels8"
+          )
+
+          end = s.index(
+              "JNIEXPORT jlong JNICALL Java_com_tssystems_Libraw_getPixels16",
+              start
+          )
+
+          replacement = r'''
+          JNIEXPORT jintArray JNICALL Java_com_tssystems_Libraw_getPixels8(
+                  JNIEnv *env, jobject obj) {
+
+              int error = 0;
+              image = decode(&error);
+
+              if (image == NULL) {
+                  __android_log_print(
+                      ANDROID_LOG_ERROR, "libraw",
+                      "RAW decode failed: %d", error
+                  );
+                  return NULL;
+              }
+
+              if (image->bits != 8 || image->colors < 3 ||
+                  image->width <= 0 || image->height <= 0 ||
+                  image->data == NULL) {
+
+                  __android_log_print(
+                      ANDROID_LOG_ERROR, "libraw",
+                      "Unsupported image: bits=%d colors=%d width=%d height=%d",
+                      image->bits, image->colors,
+                      image->width, image->height
+                  );
+                  return NULL;
+              }
+
+              size_t width = (size_t) image->width;
+              size_t height = (size_t) image->height;
+              size_t channels = (size_t) image->colors;
+
+              if (width > SIZE_MAX / height) {
+                  return NULL;
+              }
+
+              size_t pixel_count = width * height;
+
+              if (pixel_count > (size_t) INT_MAX ||
+                  pixel_count > SIZE_MAX / channels) {
+                  return NULL;
+              }
+
+              size_t required_size = pixel_count * channels;
+
+              if ((size_t) image->data_size < required_size) {
+                  __android_log_print(
+                      ANDROID_LOG_ERROR, "libraw",
+                      "Invalid image data size: %u expected at least %zu",
+                      image->data_size, required_size
+                  );
+                  return NULL;
+              }
+
+              jintArray result = (*env)->NewIntArray(
+                  env, (jsize) pixel_count
+              );
+
+              if (result == NULL) {
+                  return NULL;
+              }
+
+              jint *pixels = (jint *) malloc(
+                  pixel_count * sizeof(jint)
+              );
+
+              if (pixels == NULL) {
+                  return NULL;
+              }
+
+              const unsigned char *data =
+                  (const unsigned char *) image->data;
+
+              for (size_t i = 0; i < pixel_count; i++) {
+                  size_t pos = i * channels;
+
+                  unsigned int r = data[pos];
+                  unsigned int g = data[pos + 1];
+                  unsigned int b = data[pos + 2];
+
+                  pixels[i] = (jint) (
+                      0xFF000000u |
+                      (r << 16) |
+                      (g << 8) |
+                      b
+                  );
+              }
+
+              (*env)->SetIntArrayRegion(
+                  env, result, 0,
+                  (jsize) pixel_count, pixels
+              );
+
+              free(pixels);
+
+              if ((*env)->ExceptionCheck(env)) {
+                  return NULL;
+              }
+
+              __android_log_print(
+                  ANDROID_LOG_INFO, "libraw",
+                  "RAW decoded successfully: %dx%d, %d channels",
+                  image->width, image->height, image->colors
+              );
+
+              return result;
+          }
+
+          '''
+
+          s = s[:start] + replacement + s[end:]
+
+          if '#include <stdint.h>' not in s:
+              s = s.replace(
+                  '#include <string.h>',
+                  '#include <string.h>\n#include <stdint.h>\n#include <limits.h>'
+              )
+
+          p.write_text(s)
+          print("LibRaw JNI pixel decoder fixed")
+          PY
+
       - name: Build LibRaw
         run: |
           NDK="$ANDROID_HOME/ndk/29.0.13846066"
