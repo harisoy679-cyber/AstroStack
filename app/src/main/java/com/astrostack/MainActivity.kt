@@ -5,10 +5,15 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.BitmapRegionDecoder
+import android.graphics.Color
 import android.graphics.Rect
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
+import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.*
 import com.astrostack.engine.DiskStackEngine
@@ -31,108 +36,347 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var method: Spinner
     private lateinit var mode: Spinner
+    private lateinit var stackButton: Button
+    private lateinit var saveButton: Button
 
     private var resultFile: File? = null
     private var resultWidth = 0
     private var resultHeight = 0
     private var isProcessing = false
 
-    private fun label(text: String, size: Float = 15f) =
-        TextView(this).apply {
-            this.text = text
-            textSize = size
-            setTextColor(android.graphics.Color.WHITE)
-        }
+    private val bg = Color.rgb(10, 13, 22)
+    private val panel = Color.rgb(23, 28, 43)
+    private val blue = Color.rgb(35, 119, 235)
+    private val white = Color.rgb(240, 244, 255)
+    private val muted = Color.rgb(166, 180, 210)
 
-    private fun button(text: String, action: () -> Unit) =
-        Button(this).apply {
-            this.text = text
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).toInt()
+
+    private fun shape(
+        color: Int,
+        radius: Int = 14,
+        stroke: Int = Color.TRANSPARENT
+    ): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = dp(radius).toFloat()
+            if (stroke != Color.TRANSPARENT) {
+                setStroke(dp(1), stroke)
+            }
+        }
+    }
+
+    private fun text(
+        value: String,
+        size: Float = 15f,
+        color: Int = white,
+        bold: Boolean = false
+    ): TextView {
+        return TextView(this).apply {
+            text = value
+            textSize = size
+            setTextColor(color)
+            if (bold) setTypeface(null, Typeface.BOLD)
+        }
+    }
+
+    private fun sectionTitle(value: String): TextView {
+        return text(value, 16f, white, true).apply {
+            setPadding(dp(2), dp(4), dp(2), dp(10))
+        }
+    }
+
+    private fun verticalPanel(): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = shape(panel, 16, Color.rgb(43, 52, 75))
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+    }
+
+    private fun styledButton(
+        value: String,
+        primary: Boolean = false,
+        action: () -> Unit
+    ): Button {
+        return Button(this).apply {
+            text = value
+            textSize = 14f
+            isAllCaps = false
+            setTextColor(white)
+            background = shape(
+                if (primary) blue else Color.rgb(36, 43, 62),
+                13,
+                if (primary) Color.rgb(65, 155, 255)
+                else Color.rgb(65, 76, 105)
+            )
+            setPadding(dp(12), dp(12), dp(12), dp(12))
             setOnClickListener { action() }
         }
+    }
+
+    private fun addSpace(parent: LinearLayout, height: Int = 10) {
+        parent.addView(
+            View(this),
+            LinearLayout.LayoutParams(
+                1,
+                dp(height)
+            )
+        )
+    }
+
+    private fun addPanel(
+        parent: LinearLayout,
+        child: View
+    ) {
+        parent.addView(
+            child,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        addSpace(parent)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        window.statusBarColor = bg
+        window.navigationBarColor = bg
+        window.decorView.systemUiVisibility = 0
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(22, 24, 22, 20)
-            setBackgroundColor(android.graphics.Color.rgb(12, 17, 29))
+            setBackgroundColor(bg)
         }
 
-        root.addView(label("AstroStack", 30f))
-        root.addView(label("Astrophotography Image Stacker", 13f))
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(
+                root,
+                ScrollView.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+
+        // HEADER
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(20), dp(18), dp(18))
+            background = shape(Color.rgb(19, 25, 40), 0)
+        }
+
+        val logo = text("✦", 38f, blue, true).apply {
+            gravity = Gravity.CENTER
+        }
+
+        header.addView(
+            logo,
+            LinearLayout.LayoutParams(dp(55), dp(55))
+        )
+
+        val heading = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), 0, 0, 0)
+        }
+
+        heading.addView(text("AstroStack", 27f, white, true))
+        heading.addView(
+            text("Astrophotography Image Stacker", 12f, muted)
+        )
+
+        header.addView(
+            heading,
+            LinearLayout.LayoutParams(0, -2, 1f)
+        )
+
+        root.addView(header)
+
+        // NAVIGATION LABEL
+        val navigation = text(
+            "◉   STACKING                         ◎   CALIBRATION",
+            13f,
+            muted,
+            true
+        ).apply {
+            setPadding(dp(18), dp(15), dp(18), dp(15))
+            background = shape(Color.rgb(16, 21, 34), 0)
+        }
+
+        root.addView(navigation)
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(20))
+        }
+
+        root.addView(content)
+
+        // MODE PANEL
+        val modePanel = verticalPanel()
+        modePanel.addView(sectionTitle("✦   MODE"))
 
         mode = Spinner(this).apply {
             adapter = ArrayAdapter(
                 this@MainActivity,
                 android.R.layout.simple_spinner_dropdown_item,
-                listOf("Astro — Deep Sky", "Planet — Planetary")
+                listOf(
+                    "Astro — Deep Sky",
+                    "Planet — Planetary"
+                )
             )
         }
 
-        root.addView(label("MODE"))
-        root.addView(mode)
+        modePanel.addView(
+            mode,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48)
+            )
+        )
+
+        addPanel(content, modePanel)
+
+        // STACK METHOD
+        val methodPanel = verticalPanel()
+        methodPanel.addView(sectionTitle("⚙   STACK METHOD"))
 
         method = Spinner(this).apply {
             adapter = ArrayAdapter(
                 this@MainActivity,
                 android.R.layout.simple_spinner_dropdown_item,
-                listOf("Average", "Median", "Sigma Clipping (2.5σ)")
+                listOf(
+                    "Average",
+                    "Median",
+                    "Sigma Clipping (2.5σ)"
+                )
             )
         }
 
-        root.addView(label("STACK METHOD"))
-        root.addView(method)
+        methodPanel.addView(
+            method,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48)
+            )
+        )
 
-        root.addView(button("Pilih LIGHT frames") {
-            chooseLights()
-        })
+        addPanel(content, methodPanel)
 
-        count = label("Belum ada foto dipilih")
-        root.addView(count)
+        // LIGHT FRAMES
+        val lightPanel = verticalPanel()
+        lightPanel.addView(sectionTitle("▣   LIGHT FRAMES"))
 
-        root.addView(button("MULAI STACKING") {
+        lightPanel.addView(
+            styledButton("＋   PILIH LIGHT FRAMES") {
+                chooseLights()
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(54)
+            )
+        )
+
+        addSpace(lightPanel, 8)
+
+        count = text("0 foto dipilih", 14f, muted)
+        lightPanel.addView(count)
+
+        addPanel(content, lightPanel)
+
+        // STACK BUTTON
+        stackButton = styledButton(
+            "▶   MULAI STACKING",
+            true
+        ) {
             startStack()
-        })
+        }
+
+        content.addView(
+            stackButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(58)
+            )
+        )
+
+        addSpace(content, 14)
+
+        // PREVIEW
+        val previewPanel = verticalPanel()
+        previewPanel.addView(sectionTitle("▧   IMAGE PREVIEW"))
 
         preview = ImageView(this).apply {
             adjustViewBounds = true
             scaleType = ImageView.ScaleType.FIT_CENTER
+            background = shape(Color.BLACK, 10)
+            minimumHeight = dp(220)
         }
 
-        root.addView(
+        previewPanel.addView(
             preview,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                0,
-                1f
+                dp(230)
             )
         )
 
-        status = label("Pilih minimal dua foto.")
-        root.addView(status)
+        addPanel(content, previewPanel)
 
-        root.addView(button("SIMPAN TIFF 16-BIT") {
+        // STATUS
+        val statusPanel = verticalPanel()
+        statusPanel.addView(sectionTitle("●   PROCESS STATUS"))
+
+        status = text(
+            "Pilih minimal dua foto untuk memulai stacking.",
+            13f,
+            muted
+        )
+
+        statusPanel.addView(status)
+        addPanel(content, statusPanel)
+
+        // EXPORT
+        val exportPanel = verticalPanel()
+        exportPanel.addView(sectionTitle("⇩   EXPORT RESULT"))
+
+        saveButton = styledButton("▣   SIMPAN TIFF 16-BIT") {
             saveTiff()
-        })
+        }
 
-        root.addView(
-            label(
-                "RAW menggunakan LibRaw. " +
-                "Output sementara masih 8-bit. " +
-                "Calibration frames dan ekspor PNG belum tersedia.",
-                12f
+        exportPanel.addView(
+            saveButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(54)
             )
         )
 
-        setContentView(
-            ScrollView(this).apply {
-                addView(root)
+        addPanel(content, exportPanel)
+
+        content.addView(
+            text(
+                "AstroStack  •  Stack  •  Align  •  Explore\n" +
+                "Output saat ini: 8-bit internal, TIFF 16-bit hasil ekspansi.",
+                11f,
+                muted
+            ).apply {
+                gravity = Gravity.CENTER
+                setPadding(0, dp(18), 0, dp(12))
             }
         )
+
+        setContentView(scroll)
     }
 
     private fun chooseLights() {
+        if (isProcessing) return
+
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
@@ -166,6 +410,7 @@ class MainActivity : Activity() {
             count.text = "${lightUris.size} foto dipilih"
             resultFile = null
             preview.setImageBitmap(null)
+            status.text = "Foto berhasil dipilih. Siap stacking."
         }
     }
 
@@ -428,6 +673,8 @@ class MainActivity : Activity() {
 
         isProcessing = true
         resultFile = null
+        stackButton.isEnabled = false
+        saveButton.isEnabled = false
         status.text = "Memulai proses..."
 
         thread {
@@ -587,6 +834,8 @@ class MainActivity : Activity() {
 
                 runOnUiThread {
                     isProcessing = false
+                    stackButton.isEnabled = true
+                    saveButton.isEnabled = true
                 }
             }
         }
@@ -603,6 +852,7 @@ class MainActivity : Activity() {
         if (isProcessing) return
 
         isProcessing = true
+        saveButton.isEnabled = false
         status.text = "Menyimpan TIFF..."
 
         thread {
@@ -634,6 +884,7 @@ class MainActivity : Activity() {
             } finally {
                 runOnUiThread {
                     isProcessing = false
+                    saveButton.isEnabled = true
                 }
             }
         }
